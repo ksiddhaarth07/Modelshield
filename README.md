@@ -131,6 +131,24 @@ Both stacks are 100% on-demand serverless, so idle cost is effectively zero.
 `./deploy.ps1` prints the stack outputs (`ApiUrl`, `HealthUrl`,
 `TriageTableName`, `DashboardName`).
 
+## Benchmark
+
+`eval/dataset_100_tickets.json` holds 100 hand-labelled tickets: 55 routine
+tier-1, 20 repeat/alert-burst tickets (five canonical incidents repeated four
+times with different IDs, timestamps and whitespace) and 25 complex tier-2 /
+critical tickets, including 11 ground-truth P1s.
+
+```powershell
+python eval/run_benchmark.py --validate-only
+python eval/run_benchmark.py --v1-url $V1 --v2-url $V2 --concurrency 4
+```
+
+The runner replays both stacks with at most four in-flight requests per stack and
+reports accuracy, severity/category accuracy, P1 recall and precision, p95
+latency, exact spend, cost per successful ticket, GB-seconds, frontier tokens,
+cache/escalation/fallback counts, a v1↔v2 disagreement diff and regression list.
+A non-200 or off-contract response counts as a miss — it is never dropped.
+
 ## Local development
 
 ```powershell
@@ -141,7 +159,8 @@ python -m pytest          # 34 tests, no AWS calls
 
 The Lambda handler is framework-free and covered with a fake Bedrock client, so
 validation, telemetry, persistence-failure and model-output-recovery paths are
-all tested offline.
+all tested offline. Architecture and trade-offs are in
+[docs/architecture.md](docs/architecture.md).
 
 ## Repository layout
 
