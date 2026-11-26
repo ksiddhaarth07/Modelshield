@@ -1,0 +1,41 @@
+# Gitleaks configuration for ModelShield
+# https://github.com/gitleaks/gitleaks#configuration
+
+title = "ModelShield Gitleaks Config"
+
+[allowlist]
+  description = "Test fixture constants, example env vars, and IaC placeholders — not real credentials"
+
+  # Allow test fixture files that contain fake HMAC keys, fake Cognito pool IDs
+  # and fake client IDs used exclusively for unit-test JWT signing.
+  paths = [
+    '''backend/tests/test_security\.py''',
+    '''backend/tests/test_handler\.py''',
+    '''backend/tests/test_router\.py''',
+    '''backend/tests/test_cache\.py''',
+    '''backend/tests/test_storage\.py''',
+    '''\.env\.example''',
+    '''infra/template\.yaml''',
+    '''infra/frontend\.yaml''',
+  ]
+
+  # Specific literal strings that are known-fake test values.
+  regexes = [
+    # Unit-test HMAC signing key (never used in production)
+    '''modelshield-unit-test-hmac-key''',
+    # Fake Cognito pool / client IDs used only in pytest fixtures
+    '''ap-southeast-2_TestPool''',
+    '''ap-southeast-2_HandlerTest''',
+    '''modelshield-test-client''',
+    # CloudFormation !Sub / Ref placeholder strings (not real secrets)
+    '''\$\{AWS::''',
+    # Example / placeholder values in .env.example files
+    '''your-cognito-user-pool-client-id''',
+    '''your-cognito-issuer''',
+    '''https://your-cloudfront-distribution\.cloudfront\.net''',
+  ]
+
+  # Specific commits that are known-clean historical commits.
+  # (Leave empty; add a commit SHA here only if Gitleaks flags an old commit
+  #  that has already been confirmed to contain no real credential.)
+  commits = []

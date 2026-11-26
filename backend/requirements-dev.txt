@@ -3,3 +3,9 @@ httpx>=0.28,<1
 bandit>=1.8,<2
 pip-audit>=2.7,<3
 filelock>=4.2.1,<5; python_version >= "3.11"
+
+# boto3/botocore are provided by the Lambda managed runtime in production.
+# They are listed here so that `pytest` in CI (which runs outside Lambda)
+# can import every backend module that does `import boto3` at module load time.
+boto3>=1.38,<2
+botocore>=1.38,<2
