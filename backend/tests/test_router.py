@@ -351,6 +351,13 @@ def test_build_router_respects_env_model_ids(monkeypatch):
 
     monkeypatch.setenv("HEAVY_MODEL_ID", "custom.pro-v1:0")
     monkeypatch.setenv("LIGHT_MODEL_ID", "custom.lite-v1:0")
+    # boto3.client() needs a region to construct the endpoint URL even though
+    # no network call is made during client construction.  CI has no AWS config
+    # so we supply a dummy region via the standard env-var.
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "ap-southeast-2")
+    # Dummy creds prevent botocore's credential-chain from hitting the IMDS.
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test")
     router = build_router()
 
     assert router._pro.model_id == "custom.pro-v1:0"
