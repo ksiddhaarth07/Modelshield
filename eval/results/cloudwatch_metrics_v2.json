@@ -1,0 +1,72 @@
+[
+  {
+    "Namespace": "ModelShield/Triage",
+    "MetricName": "CacheHit",
+    "Dimensions": [
+      {
+        "Name": "StackVersion",
+        "Value": "v2"
+      }
+    ]
+  },
+  {
+    "Namespace": "ModelShield/Triage",
+    "MetricName": "LatencyMs",
+    "Dimensions": [
+      {
+        "Name": "StackVersion",
+        "Value": "v2"
+      }
+    ]
+  },
+  {
+    "Namespace": "ModelShield/Triage",
+    "MetricName": "EstimatedCostUSD",
+    "Dimensions": [
+      {
+        "Name": "StackVersion",
+        "Value": "v2"
+      }
+    ]
+  },
+  {
+    "Namespace": "ModelShield/Triage",
+    "MetricName": "FrontierTokens",
+    "Dimensions": [
+      {
+        "Name": "StackVersion",
+        "Value": "v2"
+      }
+    ]
+  },
+  {
+    "Namespace": "ModelShield/Triage",
+    "MetricName": "Escalated",
+    "Dimensions": [
+      {
+        "Name": "StackVersion",
+        "Value": "v2"
+      }
+    ]
+  },
+  {
+    "Namespace": "ModelShield/Triage",
+    "MetricName": "FallbackTriggered",
+    "Dimensions": [
+      {
+        "Name": "StackVersion",
+        "Value": "v2"
+      }
+    ]
+  },
+  {
+    "Namespace": "ModelShield/Triage",
+    "MetricName": "LambdaGBSeconds",
+    "Dimensions": [
+      {
+        "Name": "StackVersion",
+        "Value": "v2"
+      }
+    ]
+  }
+]

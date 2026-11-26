@@ -1,0 +1,42 @@
+{
+  "v1": {
+    "FunctionName": "modelshield-v1-TriageFunction-HXHu2RjpB4N1",
+    "Architectures": [
+      "x86_64"
+    ],
+    "MemorySize": 512,
+    "Runtime": "python3.13",
+    "Timeout": 29,
+    "Environment": {
+      "CONFIDENCE_THRESHOLD": "0.85",
+      "LIGHT_MODEL_ID": "apac.amazon.nova-lite-v1:0",
+      "MODEL_ID": "apac.amazon.nova-pro-v1:0",
+      "HEAVY_MODEL_ID": "apac.amazon.nova-pro-v1:0",
+      "ARCHITECTURE": "x86_64",
+      "LOG_LEVEL": "INFO",
+      "RESPONSE_CACHE_TABLE": "",
+      "STACK_VERSION": "v1",
+      "TICKETS_TABLE": "modelshield-v1-tickets"
+    }
+  },
+  "v2": {
+    "FunctionName": "modelshield-v2-TriageFunction-igjt5hFeFuPL",
+    "Architectures": [
+      "arm64"
+    ],
+    "MemorySize": 256,
+    "Runtime": "python3.13",
+    "Timeout": 29,
+    "Environment": {
+      "CONFIDENCE_THRESHOLD": "0.85",
+      "LIGHT_MODEL_ID": "apac.amazon.nova-lite-v1:0",
+      "MODEL_ID": "apac.amazon.nova-pro-v1:0",
+      "HEAVY_MODEL_ID": "apac.amazon.nova-pro-v1:0",
+      "ARCHITECTURE": "arm64",
+      "LOG_LEVEL": "INFO",
+      "RESPONSE_CACHE_TABLE": "modelshield-v2-response-cache",
+      "STACK_VERSION": "v2",
+      "TICKETS_TABLE": "modelshield-v2-tickets"
+    }
+  }
+}
