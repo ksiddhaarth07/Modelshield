@@ -2,7 +2,7 @@ pytest>=8.3,<10
 httpx>=0.28,<1
 bandit>=1.8,<2
 pip-audit>=2.7,<3
-filelock>=4.2.1,<5; python_version >= "3.11"
+filelock>=4.3.0,<5; python_version >= "3.11"
 
 # boto3/botocore are provided by the Lambda managed runtime in production.
 # They are listed here so that `pytest` in CI (which runs outside Lambda)
