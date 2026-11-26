@@ -110,7 +110,7 @@ Resources:
           RequireNumbers: true
           RequireSymbols: true
       AdminCreateUserConfig:
-        AllowAdminCreateUserOnly: true   # Only you (admin) can create accounts
+        AllowAdminCreateUserOnly: false  # Allow anyone to self-register and sign in
       Schema:
         - Name: tenant_id
           AttributeDataType: String
