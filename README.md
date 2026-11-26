@@ -149,6 +149,29 @@ latency, exact spend, cost per successful ticket, GB-seconds, frontier tokens,
 cache/escalation/fallback counts, a v1↔v2 disagreement diff and regression list.
 A non-200 or off-contract response counts as a miss — it is never dropped.
 
+## Live deck
+
+```powershell
+cd frontend
+Copy-Item .env.example .env.local   # set VITE_V1_API_URL and VITE_V2_API_URL
+npm install
+npm run dev
+```
+
+The deck is a single light-mode viewport: stack health, four KPI cards, the
+side-by-side replay ticker with route badges, the 10K→5M monthly ROI slider and
+the Well-Architected flip card. It talks to the same contract as the benchmark
+and caps each stack at four in-flight requests.
+
+## Well-Architected review
+
+[docs/war-before.md](docs/war-before.md) is the baseline review: 47 in-scope
+Best Practices across Sustainability (14) and Cost Optimization (33), acquired
+from the live framework corpus at review time, with `path:line` evidence for
+every finding. Headline gaps: 100% frontier routing (COST05-BP05), no repeat
+cache (SUS03-BP01), fixed x86_64/512 MB (COST06-BP02), no request ceiling
+(COST08-BP02) and a heavy model for every task class (SUS03-BP03).
+
 ## Local development
 
 ```powershell
@@ -194,9 +217,13 @@ docs/                     Well-Architected before/after reports and diff
 ## Status
 
 - `v1-before` implemented and unit-tested; template validates and builds.
+- 100-ticket benchmark, async runner and baseline Well-Architected review are
+  committed ([docs/war-before.md](docs/war-before.md)).
+- The live deck typechecks and produces a production bundle
+  (`frontend` → `npm run build`).
 - Live deployment is pending AWS account verification (Bedrock returns
   `AccessDeniedException: Your account is currently being verified`) and an
   Organizations SCP that denies DynamoDB/CloudFormation/Lambda on the current
   deployment identity.
-- `v2-after`, the 100-ticket benchmark, Well-Architected reports and the live
-  deck land on the `feat/war-tiered-model-router` branch.
+- `v2-after` lands on the `feat/war-tiered-model-router` branch, after which the
+  same benchmark and the same review are re-run for the delta.

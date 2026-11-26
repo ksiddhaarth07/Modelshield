@@ -11,6 +11,7 @@ samconfig.local.toml
 .samfix/
 .tmp/
 .sam-appdata/
+.npm-cache/
 build.log
 
 # Python
