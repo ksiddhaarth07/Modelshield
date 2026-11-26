@@ -100,7 +100,7 @@ function resolveCognitoEndpoint(region: string): string {
 
 async function callCognitoIdp(
   region: string,
-  target: "InitiateAuth" | "RespondToAuthChallenge",
+  target: "InitiateAuth" | "RespondToAuthChallenge" | "SignUp" | "ConfirmSignUp" | "ResendConfirmationCode",
   payload: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
   const endpoint = resolveCognitoEndpoint(region);
@@ -179,6 +179,56 @@ export async function completeCognitoNewPassword(params: {
   setSavedCognitoClientId(clientId);
   setSessionToken(idToken);
   return idToken;
+}
+
+export async function signUpWithCognito(params: {
+  email: string;
+  password: string;
+  clientId: string;
+  region?: string;
+}): Promise<{ userConfirmed: boolean }> {
+  const region = params.region ?? import.meta.env.VITE_COGNITO_REGION ?? "ap-southeast-2";
+  const clientId = params.clientId.trim();
+  const email = params.email.trim();
+  if (!clientId) throw new ApiError("Cognito App Client ID is required.");
+  const data = await callCognitoIdp(region, "SignUp", {
+    ClientId: clientId,
+    Username: email,
+    Password: params.password,
+    UserAttributes: [{ Name: "email", Value: email }],
+  });
+  setSavedCognitoClientId(clientId);
+  return { userConfirmed: Boolean(data.UserConfirmed) };
+}
+
+export async function confirmCognitoSignUp(params: {
+  email: string;
+  code: string;
+  clientId: string;
+  region?: string;
+}): Promise<void> {
+  const region = params.region ?? import.meta.env.VITE_COGNITO_REGION ?? "ap-southeast-2";
+  const clientId = params.clientId.trim();
+  if (!clientId) throw new ApiError("Cognito App Client ID is required.");
+  await callCognitoIdp(region, "ConfirmSignUp", {
+    ClientId: clientId,
+    Username: params.email.trim(),
+    ConfirmationCode: params.code.trim(),
+  });
+}
+
+export async function resendCognitoConfirmationCode(params: {
+  email: string;
+  clientId: string;
+  region?: string;
+}): Promise<void> {
+  const region = params.region ?? import.meta.env.VITE_COGNITO_REGION ?? "ap-southeast-2";
+  const clientId = params.clientId.trim();
+  if (!clientId) throw new ApiError("Cognito App Client ID is required.");
+  await callCognitoIdp(region, "ResendConfirmationCode", {
+    ClientId: clientId,
+    Username: params.email.trim(),
+  });
 }
 
 export class ApiError extends Error {

@@ -1,12 +1,15 @@
 import { useState, type FormEvent } from "react";
-import { CheckCircle2, Globe, KeyRound, Lock, LogOut, Shield, Sliders, Terminal } from "lucide-react";
+import { CheckCircle2, Globe, KeyRound, Lock, LogOut, Shield, Sliders, Terminal, UserPlus } from "lucide-react";
 import {
   completeCognitoNewPassword,
+  confirmCognitoSignUp,
   getSavedCognitoClientId,
   getSessionToken,
   parseTokenMeta,
+  resendCognitoConfirmationCode,
   setSessionToken,
   signInWithCognito,
+  signUpWithCognito,
 } from "../../lib/api";
 
 interface SettingsPageProps {
@@ -24,12 +27,14 @@ export default function SettingsPage({
   onAuthChange,
   onOpenCustom,
 }: SettingsPageProps) {
-  const [authMode, setAuthMode] = useState<"cognito" | "token">("cognito");
+  const [authMode, setAuthMode] = useState<"cognito" | "signup" | "token">("cognito");
   const [clientId, setClientId] = useState(() => getSavedCognitoClientId());
   const [region, setRegion] = useState(() => (import.meta.env.VITE_COGNITO_REGION ?? "ap-southeast-2").trim());
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
+  const [verificationCode, setVerificationCode] = useState("");
+  const [pendingConfirmation, setPendingConfirmation] = useState(false);
   const [challengeSession, setChallengeSession] = useState<string | null>(null);
   const [manualToken, setManualToken] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
@@ -77,6 +82,55 @@ export default function SettingsPage({
       }
     } catch (err) {
       setAuthError(err instanceof Error ? err.message : "Cognito sign-in failed.");
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleSignUpSubmit = async (event: FormEvent) => {
+    event.preventDefault();
+    setAuthError(null);
+    setAuthSuccess(null);
+    setAuthLoading(true);
+    try {
+      if (pendingConfirmation) {
+        await confirmCognitoSignUp({ email, code: verificationCode, clientId, region });
+        const result = await signInWithCognito({ email, password, clientId, region });
+        setPendingConfirmation(false);
+        setVerificationCode("");
+        if (result.status === "authenticated") {
+          setPassword("");
+          setAuthSuccess("Account verified and signed in.");
+          syncTokenState();
+        }
+      } else {
+        const res = await signUpWithCognito({ email, password, clientId, region });
+        if (res.userConfirmed) {
+          await signInWithCognito({ email, password, clientId, region });
+          setPassword("");
+          setAuthSuccess("Account created and signed in.");
+          syncTokenState();
+        } else {
+          setPendingConfirmation(true);
+          setAuthSuccess("Verification code sent to your email. Enter it below to activate.");
+        }
+      }
+    } catch (err) {
+      setAuthError(err instanceof Error ? err.message : "Account creation failed.");
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleResendCode = async () => {
+    setAuthError(null);
+    setAuthSuccess(null);
+    setAuthLoading(true);
+    try {
+      await resendCognitoConfirmationCode({ email, clientId, region });
+      setAuthSuccess("New verification code sent to your email.");
+    } catch (err) {
+      setAuthError(err instanceof Error ? err.message : "Could not resend verification code.");
     } finally {
       setAuthLoading(false);
     }
@@ -168,10 +222,14 @@ export default function SettingsPage({
           </div>
         )}
 
-        <div className="mt-4 flex gap-2">
+        <div className="mt-4 flex flex-wrap gap-2">
           <button
             type="button"
-            onClick={() => setAuthMode("cognito")}
+            onClick={() => {
+              setAuthMode("cognito");
+              setAuthError(null);
+              setAuthSuccess(null);
+            }}
             className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
               authMode === "cognito"
                 ? "border border-cyan-400/40 bg-cyan-500/15 text-cyan-200"
@@ -182,7 +240,26 @@ export default function SettingsPage({
           </button>
           <button
             type="button"
-            onClick={() => setAuthMode("token")}
+            onClick={() => {
+              setAuthMode("signup");
+              setAuthError(null);
+              setAuthSuccess(null);
+            }}
+            className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+              authMode === "signup"
+                ? "border border-cyan-400/40 bg-cyan-500/15 text-cyan-200"
+                : "border border-white/10 bg-white/[0.03] text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            <UserPlus size={12} /> Create Account
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setAuthMode("token");
+              setAuthError(null);
+              setAuthSuccess(null);
+            }}
             className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
               authMode === "token"
                 ? "border border-cyan-400/40 bg-cyan-500/15 text-cyan-200"
@@ -264,6 +341,96 @@ export default function SettingsPage({
                     ? "Set Password & Sign In"
                     : "Sign In"}
               </button>
+              {authError && <span className="text-xs text-rose-400">{authError}</span>}
+              {authSuccess && <span className="text-xs text-emerald-300">{authSuccess}</span>}
+            </div>
+          </form>
+        ) : authMode === "signup" ? (
+          <form onSubmit={(e) => void handleSignUpSubmit(e)} className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <label className="grid gap-1">
+              <span className="text-[11px] font-medium text-slate-400">Cognito App Client ID</span>
+              <input
+                value={clientId}
+                onChange={(e) => setClientId(e.target.value)}
+                placeholder="e.g. 5k8abc123def..."
+                required
+                className="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 font-mono text-xs text-white outline-none focus:border-neon-cyan/50"
+              />
+            </label>
+            <label className="grid gap-1">
+              <span className="text-[11px] font-medium text-slate-400">AWS Region</span>
+              <input
+                value={region}
+                onChange={(e) => setRegion(e.target.value)}
+                placeholder="ap-southeast-2"
+                required
+                className="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 font-mono text-xs text-white outline-none focus:border-neon-cyan/50"
+              />
+            </label>
+            <label className="grid gap-1">
+              <span className="text-[11px] font-medium text-slate-400">Email</span>
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="you@example.com"
+                required
+                disabled={pendingConfirmation}
+                className="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-xs text-white outline-none focus:border-neon-cyan/50 disabled:opacity-60"
+              />
+            </label>
+            {pendingConfirmation ? (
+              <label className="grid gap-1">
+                <span className="text-[11px] font-medium text-amber-300">Email Verification Code</span>
+                <input
+                  value={verificationCode}
+                  onChange={(e) => setVerificationCode(e.target.value)}
+                  placeholder="6-digit code"
+                  required
+                  className="rounded-xl border border-amber-400/40 bg-white/[0.04] px-3 py-2 font-mono text-xs text-white outline-none focus:border-neon-cyan/50"
+                />
+              </label>
+            ) : (
+              <label className="grid gap-1">
+                <span className="text-[11px] font-medium text-slate-400">
+                  Password (12+ chars, upper/lower/number/symbol)
+                </span>
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  minLength={12}
+                  required
+                  className="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-xs text-white outline-none focus:border-neon-cyan/50"
+                />
+              </label>
+            )}
+            <div className="flex flex-wrap items-center gap-3 sm:col-span-2">
+              <button
+                type="submit"
+                disabled={authLoading}
+                data-hover="1"
+                className="rounded-xl px-4 py-2 text-xs font-semibold text-white disabled:opacity-50"
+                style={{ background: "linear-gradient(135deg,#7c5cfc,#06b6d4)" }}
+              >
+                {authLoading
+                  ? pendingConfirmation
+                    ? "Verifying..."
+                    : "Creating account..."
+                  : pendingConfirmation
+                    ? "Verify & Sign In"
+                    : "Create Account"}
+              </button>
+              {pendingConfirmation && (
+                <button
+                  type="button"
+                  disabled={authLoading}
+                  onClick={() => void handleResendCode()}
+                  className="rounded-xl border border-white/15 bg-white/[0.05] px-3 py-2 text-xs text-slate-200 hover:bg-white/10 disabled:opacity-50"
+                >
+                  Resend Code
+                </button>
+              )}
               {authError && <span className="text-xs text-rose-400">{authError}</span>}
               {authSuccess && <span className="text-xs text-emerald-300">{authSuccess}</span>}
             </div>
