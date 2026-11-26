@@ -97,12 +97,15 @@ class BedrockClient:
         max_attempts: int = 3,
         base_backoff_seconds: float = 0.25,
         sleep: Any = time.sleep,
+        client_config: Optional[Config] = None,
     ) -> None:
         self.model_id = model_id
         self.max_attempts = max(1, max_attempts)
         self.base_backoff_seconds = base_backoff_seconds
         self._sleep = sleep
-        self._client = runtime_client or boto3.client("bedrock-runtime", config=_BOTO_CONFIG)
+        self._client = runtime_client or boto3.client(
+            "bedrock-runtime", config=client_config or _BOTO_CONFIG
+        )
 
     def _invoke(self, request: Dict[str, Any]) -> Dict[str, Any]:
         return self._client.converse(**request)

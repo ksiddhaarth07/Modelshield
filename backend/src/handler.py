@@ -25,6 +25,7 @@ from typing import Any, Dict, Optional, Tuple
 from bedrock_client import BedrockClient, BedrockInvocationError
 from metrics import emit_triage_metrics
 from prompts import SYSTEM_PROMPT, build_user_prompt
+from router import AdaptiveRouter, RouteOutcome, build_router
 from schemas import (
     ModelResponseError,
     ValidationError,
@@ -48,6 +49,7 @@ _CORS_HEADERS = {
 }
 
 _BEDROCK_CLIENT: Optional[BedrockClient] = None
+_ROUTER: Optional[AdaptiveRouter] = None
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +136,44 @@ def _bedrock_client() -> BedrockClient:
     return _BEDROCK_CLIENT
 
 
+def _is_v2() -> bool:
+    return _env("STACK_VERSION", "v1") == "v2"
+
+
+def _get_router() -> AdaptiveRouter:
+    global _ROUTER
+    if _ROUTER is None:
+        _ROUTER = build_router()
+    return _ROUTER
+
+
+def _run_triage(ticket: Dict[str, str]) -> RouteOutcome:
+    """v1 uses one Pro call; v2 delegates to the adaptive router."""
+
+    if _is_v2():
+        return _get_router().route(ticket)
+
+    invocation = _bedrock_client().converse(
+        system_prompt=SYSTEM_PROMPT,
+        user_prompt=build_user_prompt(ticket),
+    )
+    triage = parse_model_response(invocation.text)
+    return RouteOutcome(
+        triage=triage,
+        telemetry={
+            "route_decision": "single_heavy",
+            "model_id": invocation.model_id,
+            "cache_hit": False,
+            "escalated": False,
+            "fallback_triggered": False,
+            "input_tokens": invocation.input_tokens,
+            "output_tokens": invocation.output_tokens,
+            "frontier_tokens_used": invocation.input_tokens + invocation.output_tokens,
+            "estimated_cost_usd": round(invocation.estimated_cost_usd, 10),
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # Route handlers
 # ---------------------------------------------------------------------------
@@ -172,10 +212,7 @@ def _handle_triage(event: Dict[str, Any], context: Optional[Any]) -> Dict[str, A
 
     started = time.perf_counter()
     try:
-        invocation = _bedrock_client().converse(
-            system_prompt=SYSTEM_PROMPT,
-            user_prompt=build_user_prompt(ticket),
-        )
+        outcome = _run_triage(ticket)
     except BedrockInvocationError as exc:
         LOGGER.error(
             "bedrock_failed request_id=%s ticket_id=%s error=%s",
@@ -191,9 +228,6 @@ def _handle_triage(event: Dict[str, Any], context: Optional[Any]) -> Dict[str, A
                 "request_id": request_id,
             },
         )
-
-    try:
-        triage = parse_model_response(invocation.text)
     except ModelResponseError as exc:
         LOGGER.error(
             "model_output_invalid request_id=%s ticket_id=%s reason=%s",
@@ -210,21 +244,24 @@ def _handle_triage(event: Dict[str, Any], context: Optional[Any]) -> Dict[str, A
             },
         )
 
+    triage = outcome.triage
+    routing = outcome.telemetry
+
     elapsed_ms = max(1, int(round((time.perf_counter() - started) * 1000)))
     memory_mb = _memory_mb(context)
     gb_seconds = round((memory_mb / 1024.0) * (elapsed_ms / 1000.0), 4)
 
     telemetry = {
         "stack_version": _env("STACK_VERSION", "v1"),
-        "route_decision": "single_heavy",
-        "model_id": invocation.model_id,
-        "cache_hit": False,
-        "escalated": False,
-        "fallback_triggered": False,
-        "input_tokens": invocation.input_tokens,
-        "output_tokens": invocation.output_tokens,
-        "frontier_tokens_used": invocation.input_tokens + invocation.output_tokens,
-        "estimated_cost_usd": round(invocation.estimated_cost_usd, 10),
+        "route_decision": routing["route_decision"],
+        "model_id": routing["model_id"],
+        "cache_hit": bool(routing["cache_hit"]),
+        "escalated": bool(routing["escalated"]),
+        "fallback_triggered": bool(routing["fallback_triggered"]),
+        "input_tokens": int(routing["input_tokens"]),
+        "output_tokens": int(routing["output_tokens"]),
+        "frontier_tokens_used": int(routing["frontier_tokens_used"]),
+        "estimated_cost_usd": routing["estimated_cost_usd"],
         "latency_ms": elapsed_ms,
         "lambda_memory_mb": memory_mb,
         "lambda_gb_seconds": gb_seconds,
@@ -260,9 +297,9 @@ def _handle_triage(event: Dict[str, Any], context: Optional[Any]) -> Dict[str, A
             latency_ms=telemetry["latency_ms"],
             lambda_gb_seconds=telemetry["lambda_gb_seconds"],
             frontier_tokens=telemetry["frontier_tokens_used"],
-            cache_hit=False,
-            escalated=False,
-            fallback_triggered=False,
+            cache_hit=telemetry["cache_hit"],
+            escalated=telemetry["escalated"],
+            fallback_triggered=telemetry["fallback_triggered"],
         )
     except Exception:
         LOGGER.exception("emf_emit_failed ticket_id=%s", ticket["ticket_id"])

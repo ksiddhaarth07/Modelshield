@@ -171,6 +171,46 @@ def test_stats_storage_error_returns_503(monkeypatch):
     assert response["statusCode"] == 503
 
 
+def test_v2_delegates_to_adaptive_router(monkeypatch):
+    from router import RouteOutcome
+
+    class FakeRouter:
+        def route(self, ticket):
+            return RouteOutcome(
+                triage={
+                    "severity": "P4",
+                    "category": "how_to",
+                    "confidence": 0.91,
+                    "summary": "Routine question.",
+                    "draft_reply": "Here is the link you need.",
+                },
+                telemetry={
+                    "route_decision": "nova_micro",
+                    "model_id": "us.amazon.nova-micro-v1:0",
+                    "cache_hit": False,
+                    "escalated": False,
+                    "fallback_triggered": False,
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "frontier_tokens_used": 0,
+                    "estimated_cost_usd": 0.0000105,
+                },
+            )
+
+    monkeypatch.setenv("STACK_VERSION", "v2")
+    monkeypatch.setattr(handler, "_ROUTER", FakeRouter())
+    monkeypatch.setattr(handler, "save_triage", lambda record: True)
+    monkeypatch.setattr(handler, "emit_triage_metrics", lambda **kwargs: None)
+
+    response = handler.lambda_handler(_event("POST", "/triage", VALID_BODY), None)
+    telemetry = json.loads(response["body"])["telemetry"]
+
+    assert response["statusCode"] == 200
+    assert telemetry["route_decision"] == "nova_micro"
+    assert telemetry["frontier_tokens_used"] == 0
+    assert telemetry["stack_version"] == "v2"
+
+
 def test_base64_body_is_decoded(monkeypatch, wired):
     import base64
 

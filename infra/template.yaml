@@ -1,10 +1,10 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
 Description: >-
-  ModelShield v1-before. Serverless AI incident-triage gateway:
-  API Gateway HTTP API -> Lambda (x86_64, 512 MB) -> Amazon Nova Pro -> DynamoDB.
-  This is the deliberately conventional single-model baseline used to measure
-  the cost, latency and sustainability gap that v2-after closes.
+  ModelShield. Serverless AI incident-triage gateway with two profiles:
+  v1-before (x86_64 / 512 MB / 100% Nova Pro) and v2-after (arm64 / 256 MB /
+  fail-open TTL cache + confidence-gated Nova Micro -> Pro router). One
+  template, one API contract, measured side by side.
 
 Parameters:
   StackVersion:
@@ -30,25 +30,18 @@ Parameters:
     MaxValue: 3653
     Description: CloudWatch Logs retention. 14 days keeps demo cost near zero.
 
+Conditions:
+  IsV2: !Equals [!Ref StackVersion, "v2"]
+
 Globals:
   Function:
     Runtime: python3.13
-    Architectures:
-      - x86_64
-    MemorySize: 512
     Timeout: 29
-    Environment:
-      Variables:
-        STACK_VERSION: !Ref StackVersion
-        MODEL_ID: !Ref ModelId
-        TICKETS_TABLE: !Ref TicketsTable
-        ARCHITECTURE: x86_64
-        LOG_LEVEL: INFO
 
 Resources:
   # ---------------------------------------------------------------------------
-  # Edge: public HTTP API with CORS. No throttling in v1 - this is one of the
-  # gaps the Well-Architected review flags (unbounded Bedrock spend on spikes).
+  # Edge: public HTTP API with CORS. v2 adds a spend ceiling (25 req/s, burst
+  # 50); v1 deliberately has none, which the Well-Architected review flags.
   # ---------------------------------------------------------------------------
   HttpApi:
     Type: AWS::Serverless::HttpApi
@@ -64,6 +57,11 @@ Resources:
         AllowHeaders:
           - Content-Type
           - Authorization
+      DefaultRouteSettings: !If
+        - IsV2
+        - ThrottlingBurstLimit: 50
+          ThrottlingRateLimit: 25
+        - !Ref AWS::NoValue
 
   # ---------------------------------------------------------------------------
   # Data: one on-demand table. PAY_PER_REQUEST means $0 idle cost between demos.
@@ -84,20 +82,59 @@ Resources:
       DeletionProtectionEnabled: false
 
   # ---------------------------------------------------------------------------
-  # Compute: single-model triage handler.
+  # v2 only: normalised-key response cache. PAY_PER_REQUEST + DynamoDB TTL on
+  # `expires_at` means expired entries cost nothing and need no reaper.
+  # ---------------------------------------------------------------------------
+  ResponseCacheTable:
+    Type: AWS::DynamoDB::Table
+    Condition: IsV2
+    Properties:
+      TableName: !Sub "${AWS::StackName}-response-cache"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: cache_key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: cache_key
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+      DeletionProtectionEnabled: false
+
+  # ---------------------------------------------------------------------------
+  # Compute: one handler, two profiles. v1 pays for x86_64/512 MB on every
+  # request; v2 runs on Graviton at 256 MB because the handler is I/O-bound.
   # ---------------------------------------------------------------------------
   TriageFunction:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: ../backend/src/
       Handler: handler.lambda_handler
-      Description: ModelShield triage handler (Nova Pro baseline)
+      Description: ModelShield triage handler (v1 Pro baseline / v2 adaptive router)
+      Architectures:
+        - !If
+          - IsV2
+          - arm64
+          - x86_64
+      MemorySize: !If [IsV2, 256, 512]
       Environment:
         Variables:
           STACK_VERSION: !Ref StackVersion
           MODEL_ID: !Ref ModelId
           TICKETS_TABLE: !Ref TicketsTable
-          ARCHITECTURE: x86_64
+          RESPONSE_CACHE_TABLE: !If
+            - IsV2
+            - !Ref ResponseCacheTable
+            - ""
+          CONFIDENCE_THRESHOLD: "0.85"
+          ARCHITECTURE: !If
+            - IsV2
+            - arm64
+            - x86_64
+          LOG_LEVEL: INFO
       # SAM's `Policies` property accepts bare IAM documents (it names the
       # generated inline policy itself); a {PolicyName, PolicyDocument} wrapper
       # is rejected by the translator.
@@ -113,6 +150,10 @@ Resources:
                 - dynamodb:UpdateItem
               Resource:
                 - !GetAtt TicketsTable.Arn
+                - !If
+                  - IsV2
+                  - !GetAtt ResponseCacheTable.Arn
+                  - !Ref AWS::NoValue
         - Version: "2012-10-17"
           Statement:
             - Effect: Allow
@@ -120,7 +161,15 @@ Resources:
                 - bedrock:InvokeModel
               Resource:
                 - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/us.amazon.nova-pro-v1:0"
+                - !If
+                  - IsV2
+                  - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/us.amazon.nova-micro-v1:0"
+                  - !Ref AWS::NoValue
                 - "arn:aws:bedrock:us-*::foundation-model/amazon.nova-pro-v1:0"
+                - !If
+                  - IsV2
+                  - "arn:aws:bedrock:us-*::foundation-model/amazon.nova-micro-v1:0"
+                  - !Ref AWS::NoValue
       Events:
         TriagePost:
           Type: HttpApi
@@ -246,6 +295,11 @@ Outputs:
   TriageTableName:
     Description: DynamoDB table holding triage records
     Value: !Ref TicketsTable
+
+  ResponseCacheTableName:
+    Condition: IsV2
+    Description: DynamoDB TTL cache table (v2 only)
+    Value: !Ref ResponseCacheTable
 
   TriageFunctionName:
     Description: Lambda function name
