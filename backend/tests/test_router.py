@@ -347,18 +347,22 @@ def test_timeout_and_retry_budget_stays_under_20_seconds():
 
 
 def test_build_router_respects_env_model_ids(monkeypatch):
-    from router import build_router
+    # This test only checks that build_router() reads model IDs from env vars.
+    # It does NOT need a real AWS connection, so we stub out BedrockClient.__init__
+    # to prevent boto3.client() from running (which requires a configured region
+    # and credentials in CI).
+    import unittest.mock as mock
+    import bedrock_client as _bc
 
     monkeypatch.setenv("HEAVY_MODEL_ID", "custom.pro-v1:0")
     monkeypatch.setenv("LIGHT_MODEL_ID", "custom.lite-v1:0")
-    # boto3.client() needs a region to construct the endpoint URL even though
-    # no network call is made during client construction.  CI has no AWS config
-    # so we supply a dummy region via the standard env-var.
-    monkeypatch.setenv("AWS_DEFAULT_REGION", "ap-southeast-2")
-    # Dummy creds prevent botocore's credential-chain from hitting the IMDS.
-    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test")
-    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test")
-    router = build_router()
+
+    def _fake_init(self, model_id, **kwargs):
+        self.model_id = model_id
+
+    with mock.patch.object(_bc.BedrockClient, "__init__", _fake_init):
+        from router import build_router
+        router = build_router()
 
     assert router._pro.model_id == "custom.pro-v1:0"
     assert router._lite.model_id == "custom.lite-v1:0"
