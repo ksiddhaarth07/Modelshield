@@ -1,0 +1,38 @@
+# Secrets and local AWS material
+.env
+.env.*
+!.env.example
+*.pem
+.aws/
+.aws-sam/
+samconfig.local.toml
+
+# Local sandbox build shims / scratch (not part of the project)
+.samfix/
+.tmp/
+.sam-appdata/
+build.log
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+
+# Node / frontend
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+
+# Raw / unsanitised review output
+*.raw.md
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

@@ -1,0 +1,256 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  ModelShield v1-before. Serverless AI incident-triage gateway:
+  API Gateway HTTP API -> Lambda (x86_64, 512 MB) -> Amazon Nova Pro -> DynamoDB.
+  This is the deliberately conventional single-model baseline used to measure
+  the cost, latency and sustainability gap that v2-after closes.
+
+Parameters:
+  StackVersion:
+    Type: String
+    Default: v1
+    AllowedValues:
+      - v1
+      - v2
+    Description: Logical stack version, emitted in telemetry and EMF dimensions.
+
+  ModelId:
+    Type: String
+    Default: us.amazon.nova-pro-v1:0
+    AllowedValues:
+      - us.amazon.nova-pro-v1:0
+      - us.amazon.nova-micro-v1:0
+    Description: Bedrock cross-region inference profile used for triage.
+
+  LogRetentionDays:
+    Type: Number
+    Default: 14
+    MinValue: 1
+    MaxValue: 3653
+    Description: CloudWatch Logs retention. 14 days keeps demo cost near zero.
+
+Globals:
+  Function:
+    Runtime: python3.13
+    Architectures:
+      - x86_64
+    MemorySize: 512
+    Timeout: 29
+    Environment:
+      Variables:
+        STACK_VERSION: !Ref StackVersion
+        MODEL_ID: !Ref ModelId
+        TICKETS_TABLE: !Ref TicketsTable
+        ARCHITECTURE: x86_64
+        LOG_LEVEL: INFO
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # Edge: public HTTP API with CORS. No throttling in v1 - this is one of the
+  # gaps the Well-Architected review flags (unbounded Bedrock spend on spikes).
+  # ---------------------------------------------------------------------------
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      Description: ModelShield triage HTTP API
+      CorsConfiguration:
+        AllowOrigins:
+          - "*"
+        AllowMethods:
+          - GET
+          - POST
+          - OPTIONS
+        AllowHeaders:
+          - Content-Type
+          - Authorization
+
+  # ---------------------------------------------------------------------------
+  # Data: one on-demand table. PAY_PER_REQUEST means $0 idle cost between demos.
+  # ---------------------------------------------------------------------------
+  TicketsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${AWS::StackName}-tickets"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: ticket_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: ticket_id
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+      DeletionProtectionEnabled: false
+
+  # ---------------------------------------------------------------------------
+  # Compute: single-model triage handler.
+  # ---------------------------------------------------------------------------
+  TriageFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend/src/
+      Handler: handler.lambda_handler
+      Description: ModelShield triage handler (Nova Pro baseline)
+      Environment:
+        Variables:
+          STACK_VERSION: !Ref StackVersion
+          MODEL_ID: !Ref ModelId
+          TICKETS_TABLE: !Ref TicketsTable
+          ARCHITECTURE: x86_64
+      # SAM's `Policies` property accepts bare IAM documents (it names the
+      # generated inline policy itself); a {PolicyName, PolicyDocument} wrapper
+      # is rejected by the translator.
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:PutItem
+                - dynamodb:GetItem
+                - dynamodb:Query
+                - dynamodb:Scan
+                - dynamodb:UpdateItem
+              Resource:
+                - !GetAtt TicketsTable.Arn
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource:
+                - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/us.amazon.nova-pro-v1:0"
+                - "arn:aws:bedrock:us-*::foundation-model/amazon.nova-pro-v1:0"
+      Events:
+        TriagePost:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /triage
+            Method: POST
+        HealthGet:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /health
+            Method: GET
+        StatsGet:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /stats
+            Method: GET
+
+  TriageFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${TriageFunction}"
+      RetentionInDays: !Ref LogRetentionDays
+
+  # ---------------------------------------------------------------------------
+  # Observability: EMF metrics land in ModelShield/Triage, dimensioned by
+  # StackVersion so v1 and v2 can be compared on one dashboard.
+  # ---------------------------------------------------------------------------
+  TriageDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${AWS::StackName}-triage"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "title": "Average Bedrock cost per triage request (USD)",
+                "region": "${AWS::Region}",
+                "view": "timeSeries",
+                "stacked": false,
+                "period": 300,
+                "metrics": [
+                  [ "ModelShield/Triage", "EstimatedCostUSD", "StackVersion", "${StackVersion}", { "stat": "Average", "label": "${StackVersion} avg cost/request" } ]
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "title": "p95 triage latency (ms)",
+                "region": "${AWS::Region}",
+                "view": "timeSeries",
+                "stacked": false,
+                "period": 300,
+                "metrics": [
+                  [ "ModelShield/Triage", "LatencyMs", "StackVersion", "${StackVersion}", { "stat": "p95", "label": "${StackVersion} p95" } ]
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 6, "width": 12, "height": 6,
+              "properties": {
+                "title": "Frontier tokens consumed",
+                "region": "${AWS::Region}",
+                "view": "timeSeries",
+                "stacked": false,
+                "period": 300,
+                "metrics": [
+                  [ "ModelShield/Triage", "FrontierTokens", "StackVersion", "${StackVersion}", { "stat": "Sum", "label": "${StackVersion} frontier tokens" } ]
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12, "y": 6, "width": 12, "height": 6,
+              "properties": {
+                "title": "Cache hits / escalations / fallbacks",
+                "region": "${AWS::Region}",
+                "view": "timeSeries",
+                "stacked": false,
+                "period": 300,
+                "metrics": [
+                  [ "ModelShield/Triage", "CacheHit", "StackVersion", "${StackVersion}", { "stat": "Sum", "label": "cache hits" } ],
+                  [ "ModelShield/Triage", "Escalated", "StackVersion", "${StackVersion}", { "stat": "Sum", "label": "escalations" } ],
+                  [ "ModelShield/Triage", "FallbackTriggered", "StackVersion", "${StackVersion}", { "stat": "Sum", "label": "fallbacks" } ]
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 12, "width": 24, "height": 6,
+              "properties": {
+                "title": "Lambda compute footprint (GB-seconds) and errors",
+                "region": "${AWS::Region}",
+                "view": "timeSeries",
+                "stacked": false,
+                "period": 300,
+                "metrics": [
+                  [ "ModelShield/Triage", "LambdaGBSeconds", "StackVersion", "${StackVersion}", { "stat": "Sum", "label": "${StackVersion} GB-seconds" } ],
+                  [ "AWS/Lambda", "Errors", "FunctionName", "${TriageFunction}", { "stat": "Sum", "label": "handler errors", "yAxis": "right" } ]
+                ]
+              }
+            }
+          ]
+        }
+
+Outputs:
+  ApiUrl:
+    Description: Base URL for the triage API
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com"
+
+  HealthUrl:
+    Description: Health check endpoint
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/health"
+
+  TriageTableName:
+    Description: DynamoDB table holding triage records
+    Value: !Ref TicketsTable
+
+  TriageFunctionName:
+    Description: Lambda function name
+    Value: !Ref TriageFunction
+
+  DashboardName:
+    Description: CloudWatch dashboard name
+    Value: !Ref TriageDashboard

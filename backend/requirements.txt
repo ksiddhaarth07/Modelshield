@@ -1,0 +1,6 @@
+# Intentionally empty.
+#
+# The Lambda python3.13 managed runtime ships boto3 and botocore, and every
+# ModelShield module is otherwise stdlib-only. Zero third-party dependencies is
+# what makes `sam build` produce a pure-Python zip for arm64 with no Docker and
+# no native wheels.
