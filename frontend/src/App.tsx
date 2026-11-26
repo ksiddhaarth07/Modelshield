@@ -26,7 +26,7 @@ export default function App() {
   const [cmdOpen, setCmdOpen] = useState(false);
   const [v1Results, setV1Results] = useState<TriageResult[]>(INITIAL_V1_RESULTS);
   const [v2Results, setV2Results] = useState<TriageResult[]>(INITIAL_V2_RESULTS);
-  const [failures, setFailures] = useState({ v1: 0, v2: 0 });
+  const [failures, setFailures] = useState<{ v1: string[]; v2: string[] }>({ v1: [], v2: [] });
   const [running, setRunning] = useState(false);
   const [health, setHealth] = useState<{ v1: HealthState; v2: HealthState }>({
     v1: "unknown",
@@ -101,15 +101,25 @@ export default function App() {
 
   const truth = useMemo(() => new Map(TICKETS.map((t) => [t.ticket_id, t])), []);
   const v1Metrics = useMemo(
-    () => (v1Results.length > 0 ? summarize(v1Results, truth, failures.v1) : null),
+    () =>
+      v1Results.length + failures.v1.length > 0
+        ? summarize(v1Results, truth, failures.v1.length, failures.v1)
+        : null,
     [v1Results, truth, failures.v1],
   );
   const v2Metrics = useMemo(
-    () => (v2Results.length > 0 ? summarize(v2Results, truth, failures.v2) : null),
+    () =>
+      v2Results.length + failures.v2.length > 0
+        ? summarize(v2Results, truth, failures.v2.length, failures.v2)
+        : null,
     [v2Results, truth, failures.v2],
   );
 
-  const progress = Math.max(v1Results.length + failures.v1, v2Results.length + failures.v2, 0);
+  const progress = Math.max(
+    v1Results.length + failures.v1.length,
+    v2Results.length + failures.v2.length,
+    0,
+  );
   const canRun = V1_BASE !== null && V2_BASE !== null;
 
   const runReplay = async () => {
@@ -119,7 +129,7 @@ export default function App() {
     setRunning(true);
     setV1Results([]);
     setV2Results([]);
-    setFailures({ v1: 0, v2: 0 });
+    setFailures({ v1: [], v2: [] });
 
     try {
       await Promise.all([
@@ -129,7 +139,8 @@ export default function App() {
           concurrency: 2,
           signal: controller.signal,
           onResult: (r) => setV1Results((prev) => [...prev, r]),
-          onFailure: () => setFailures((prev) => ({ ...prev, v1: prev.v1 + 1 })),
+          onFailure: (ticket) =>
+            setFailures((prev) => ({ ...prev, v1: [...prev.v1, ticket.ticket_id] })),
         }),
         replayStack({
           baseUrl: V2_BASE,
@@ -137,7 +148,8 @@ export default function App() {
           concurrency: 2,
           signal: controller.signal,
           onResult: (r) => setV2Results((prev) => [...prev, r]),
-          onFailure: () => setFailures((prev) => ({ ...prev, v2: prev.v2 + 1 })),
+          onFailure: (ticket) =>
+            setFailures((prev) => ({ ...prev, v2: [...prev.v2, ticket.ticket_id] })),
         }),
       ]);
     } finally {

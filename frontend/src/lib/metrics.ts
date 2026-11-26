@@ -16,6 +16,7 @@ export function summarize(
   results: TriageResult[],
   truth: Map<string, Ticket>,
   failures = 0,
+  failedIds: Iterable<string> = [],
 ): RunMetrics {
   const completed = results.length;
   const attempted = completed + failures;
@@ -23,8 +24,10 @@ export function summarize(
   let correct = 0;
   let p1Total = 0;
   let p1Hit = 0;
+  const seenIds = new Set<string>();
 
   for (const result of results) {
+    seenIds.add(result.ticket_id);
     const expected = truth.get(result.ticket_id)?.ground_truth;
     if (!expected) continue;
     if (expected.severity === result.severity && expected.category === result.category) {
@@ -33,6 +36,14 @@ export function summarize(
     if (expected.severity === "P1") {
       p1Total += 1;
       if (result.severity === "P1") p1Hit += 1;
+    }
+  }
+
+  for (const ticketId of failedIds) {
+    if (seenIds.has(ticketId)) continue;
+    seenIds.add(ticketId);
+    if (truth.get(ticketId)?.ground_truth.severity === "P1") {
+      p1Total += 1;
     }
   }
 
