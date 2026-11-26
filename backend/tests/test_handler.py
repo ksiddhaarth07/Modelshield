@@ -1,13 +1,18 @@
 """Handler behaviour tests with a fake Bedrock client (zero AWS calls)."""
 
 import json
+import time
 from types import SimpleNamespace
 
 import pytest
 
 import handler
 from bedrock_client import BedrockInvocationError, Invocation
+from rate_limit import InMemoryRateLimitStore, RateLimiter
 from storage import StorageError
+
+TEST_ISSUER = "https://cognito-idp.ap-southeast-2.amazonaws.com/ap-southeast-2_HandlerTest"
+TEST_CLIENT_ID = "handler-test-client"
 
 VALID_BODY = {
     "ticket_id": "tkt-042",
@@ -26,11 +31,28 @@ MODEL_TEXT = json.dumps(
 )
 
 
-def _event(method="POST", path="/triage", body=None):
+def _event(method="POST", path="/triage", body=None, roles=("admin",)):
+    now = int(time.time())
     return {
         "version": "2.0",
         "rawPath": path,
-        "requestContext": {"http": {"method": method, "path": path}, "requestId": "req-test-1"},
+        "requestContext": {
+            "http": {"method": method, "path": path},
+            "requestId": "req-test-1",
+            "authorizer": {
+                "jwt": {
+                    "claims": {
+                        "sub": "test-user-1",
+                        "custom:tenant_id": "tenant-test",
+                        "iss": TEST_ISSUER,
+                        "aud": TEST_CLIENT_ID,
+                        "token_use": "id",
+                        "cognito:groups": list(roles),
+                        "exp": now + 300,
+                    }
+                }
+            },
+        },
         "body": json.dumps(body) if body is not None else None,
         "isBase64Encoded": False,
     }
@@ -61,6 +83,17 @@ def _invocation():
     )
 
 
+@pytest.fixture(autouse=True)
+def auth_env(monkeypatch):
+    monkeypatch.setenv("COGNITO_ISSUER", TEST_ISSUER)
+    monkeypatch.setenv("COGNITO_CLIENT_ID", TEST_CLIENT_ID)
+    monkeypatch.setattr(
+        handler,
+        "_RATE_LIMITER",
+        RateLimiter(store=InMemoryRateLimitStore(), user_limit=50, tenant_limit=100),
+    )
+
+
 @pytest.fixture
 def wired(monkeypatch):
     fake = FakeBedrock(invocation=_invocation())
@@ -80,7 +113,8 @@ def test_health_is_cheap_and_reports_stack_version(monkeypatch):
     assert response["statusCode"] == 200
     assert body["status"] == "ok"
     assert body["stack_version"] == "v1"
-    assert body["model_id"] == "apac.amazon.nova-pro-v1:0"
+    assert "model_id" not in body
+    assert "tickets_table" not in body
 
 
 def test_unknown_route_returns_404():
@@ -156,14 +190,14 @@ def test_persistence_failure_does_not_fail_the_request(monkeypatch, wired):
 
 def test_stats_returns_aggregate(monkeypatch):
     canned = {"total_tickets": 3, "by_severity": {"P1": 1}, "stack_version": "v1"}
-    monkeypatch.setattr(handler, "get_stats", lambda: canned)
+    monkeypatch.setattr(handler, "get_stats", lambda tenant_id=None: canned)
     response = handler.lambda_handler(_event("GET", "/stats"), None)
     assert response["statusCode"] == 200
     assert json.loads(response["body"])["total_tickets"] == 3
 
 
 def test_stats_storage_error_returns_503(monkeypatch):
-    def boom():
+    def boom(tenant_id=None):
         raise StorageError("unavailable")
 
     monkeypatch.setattr(handler, "get_stats", boom)
@@ -175,7 +209,7 @@ def test_v2_delegates_to_adaptive_router(monkeypatch):
     from router import RouteOutcome
 
     class FakeRouter:
-        def route(self, ticket):
+        def route(self, ticket, tenant_id="default"):
             return RouteOutcome(
                 triage={
                     "severity": "P4",

@@ -1,10 +1,9 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
 Description: >-
-  ModelShield. Serverless AI incident-triage gateway with two profiles:
-  v1-before (x86_64 / 512 MB / 100% Nova Pro) and v2-after (arm64 / 256 MB /
-  fail-open TTL cache + confidence-gated Nova Lite -> Pro router). One
-  template, one API contract, measured side by side.
+  ModelShield. Hardened serverless AI incident-triage gateway with Cognito JWT
+  auth, per-user/per-tenant rate limiting, tenant-isolated DynamoDB storage &
+  TTL cache, prompt-injection safeguards, and cost-aware AWS security controls.
 
 Parameters:
   StackVersion:
@@ -29,15 +28,57 @@ Parameters:
       - apac.amazon.nova-lite-v1:0
     Description: Bedrock cross-region inference profile for the light tier (v2).
 
+  AllowedOrigins:
+    Type: CommaDelimitedList
+    Default: "https://d1856jwkm5m4pg.cloudfront.net"
+    Description: Explicit comma-separated CORS origins permitted to call this API.
+
+  ExternalCognitoIssuer:
+    Type: String
+    Default: ""
+    Description: Optional existing Cognito UserPool issuer URL (leave empty to provision one).
+
+  ExternalCognitoClientId:
+    Type: String
+    Default: ""
+    Description: Optional existing Cognito App Client ID when reusing a shared UserPool.
+
+  ReservedConcurrency:
+    Type: Number
+    Default: 10
+    MinValue: 0
+    Description: Reserved Lambda concurrency ceiling (0 disables explicit reservation).
+
   LogRetentionDays:
     Type: Number
-    Default: 14
-    MinValue: 1
+    Default: 30
+    MinValue: 7
     MaxValue: 3653
-    Description: CloudWatch Logs retention. 14 days keeps demo cost near zero.
+    Description: CloudWatch Logs retention in days for auditability.
+
+  EnableCloudTrail:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: Provision an encrypted account CloudTrail S3 audit trail when true.
+
+  EnablePaidSecurityAddons:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: Opt-in flag for paid AWS threat-detection add-ons (GuardDuty).
 
 Conditions:
   IsV2: !Equals [!Ref StackVersion, "v2"]
+  UseExternalCognito: !Not [!Equals [!Ref ExternalCognitoIssuer, ""]]
+  CreateCognitoPool: !Equals [!Ref ExternalCognitoIssuer, ""]
+  HasReservedConcurrency: !Not [!Equals [!Ref ReservedConcurrency, 0]]
+  UseCloudTrail: !Equals [!Ref EnableCloudTrail, "true"]
+  UsePaidSecurityAddons: !Equals [!Ref EnablePaidSecurityAddons, "true"]
 
 Globals:
   Function:
@@ -46,16 +87,93 @@ Globals:
 
 Resources:
   # ---------------------------------------------------------------------------
-  # Edge: public HTTP API with CORS. v2 adds a spend ceiling (25 req/s, burst
-  # 50); v1 deliberately has none, which the Well-Architected review flags.
+  # Identity: Cognito User Pool + Public SPA Client + Admin Role Group
   # ---------------------------------------------------------------------------
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Condition: CreateCognitoPool
+    Properties:
+      UserPoolName: !Sub "${AWS::StackName}-users"
+      AutoVerifiedAttributes:
+        - email
+      UsernameAttributes:
+        - email
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireLowercase: true
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+      Schema:
+        - Name: tenant_id
+          AttributeDataType: String
+          Mutable: true
+          Required: false
+
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Condition: CreateCognitoPool
+    Properties:
+      ClientName: !Sub "${AWS::StackName}-client"
+      UserPoolId: !Ref CognitoUserPool
+      GenerateSecret: false
+      PreventUserExistenceErrors: ENABLED
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      SupportedIdentityProviders:
+        - COGNITO
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      RefreshTokenValidity: 7
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: days
+
+  CognitoAdminGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Condition: CreateCognitoPool
+    Properties:
+      GroupName: admin
+      Description: Administrative group authorized for /stats access
+      UserPoolId: !Ref CognitoUserPool
+
+  # ---------------------------------------------------------------------------
+  # Edge: HTTP API with Cognito JWT Authorizer, Strict CORS, Access Logs & Throttle
+  # ---------------------------------------------------------------------------
+  HttpApiAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/apigateway/${AWS::StackName}-access"
+      RetentionInDays: !Ref LogRetentionDays
+
   HttpApi:
     Type: AWS::Serverless::HttpApi
     Properties:
-      Description: ModelShield triage HTTP API
+      Description: ModelShield authenticated triage HTTP API
+      Auth:
+        DefaultAuthorizer: CognitoJwt
+        Authorizers:
+          CognitoJwt:
+            IdentitySource: "$request.header.Authorization"
+            JwtConfiguration:
+              issuer: !If
+                - UseExternalCognito
+                - !Ref ExternalCognitoIssuer
+                - !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${CognitoUserPool}"
+              audience:
+                - !If
+                  - UseExternalCognito
+                  - !Ref ExternalCognitoClientId
+                  - !Ref CognitoUserPoolClient
       CorsConfiguration:
-        AllowOrigins:
-          - "*"
+        AllowOrigins: !Ref AllowedOrigins
         AllowMethods:
           - GET
           - POST
@@ -63,14 +181,16 @@ Resources:
         AllowHeaders:
           - Content-Type
           - Authorization
-      DefaultRouteSettings: !If
-        - IsV2
-        - ThrottlingBurstLimit: 50
-          ThrottlingRateLimit: 25
-        - !Ref AWS::NoValue
+        MaxAge: 600
+      AccessLogSettings:
+        DestinationArn: !GetAtt HttpApiAccessLogGroup.Arn
+        Format: '{"requestId":"$context.requestId","ip":"$context.identity.sourceIp","method":"$context.httpMethod","path":"$context.path","status":"$context.status","latencyMs":"$context.responseLatency","error":"$context.error.messageString"}'
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: !If [IsV2, 50, 25]
+        ThrottlingRateLimit: !If [IsV2, 25, 10]
 
   # ---------------------------------------------------------------------------
-  # Data: one on-demand table. PAY_PER_REQUEST means $0 idle cost between demos.
+  # Data: Encrypted DynamoDB tables with TTL retention & Point-in-Time Recovery
   # ---------------------------------------------------------------------------
   TicketsTable:
     Type: AWS::DynamoDB::Table
@@ -80,17 +200,51 @@ Resources:
       AttributeDefinitions:
         - AttributeName: ticket_id
           AttributeType: S
+        - AttributeName: tenant_id
+          AttributeType: S
+        - AttributeName: created_at
+          AttributeType: S
       KeySchema:
         - AttributeName: ticket_id
           KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: TenantIndex
+          KeySchema:
+            - AttributeName: tenant_id
+              KeyType: HASH
+            - AttributeName: created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       SSESpecification:
         SSEEnabled: true
       DeletionProtectionEnabled: false
 
-  # ---------------------------------------------------------------------------
-  # v2 only: normalised-key response cache. PAY_PER_REQUEST + DynamoDB TTL on
-  # `expires_at` means expired entries cost nothing and need no reaper.
-  # ---------------------------------------------------------------------------
+  RateLimitTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${AWS::StackName}-rate-limits"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: cache_key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: cache_key
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      DeletionProtectionEnabled: false
+
   ResponseCacheTable:
     Type: AWS::DynamoDB::Table
     Condition: IsV2
@@ -106,26 +260,28 @@ Resources:
       TimeToLiveSpecification:
         AttributeName: expires_at
         Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       SSESpecification:
         SSEEnabled: true
       DeletionProtectionEnabled: false
 
   # ---------------------------------------------------------------------------
-  # Compute: one handler, two profiles. v1 pays for x86_64/512 MB on every
-  # request; v2 runs on Graviton at 256 MB because the handler is I/O-bound.
+  # Compute: Least-privilege Lambda handler with concurrency ceiling
   # ---------------------------------------------------------------------------
   TriageFunction:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: ../backend/src/
       Handler: handler.lambda_handler
-      Description: ModelShield triage handler (v1 Pro baseline / v2 adaptive router)
+      Description: ModelShield authenticated triage handler
       Architectures:
         - !If
           - IsV2
           - arm64
           - x86_64
       MemorySize: !If [IsV2, 256, 512]
+      ReservedConcurrentExecutions: !If [HasReservedConcurrency, !Ref ReservedConcurrency, !Ref "AWS::NoValue"]
       Environment:
         Variables:
           STACK_VERSION: !Ref StackVersion
@@ -133,38 +289,62 @@ Resources:
           HEAVY_MODEL_ID: !Ref HeavyModelId
           LIGHT_MODEL_ID: !Ref LightModelId
           TICKETS_TABLE: !Ref TicketsTable
+          TICKETS_TENANT_INDEX: TenantIndex
+          RATE_LIMIT_TABLE: !Ref RateLimitTable
           RESPONSE_CACHE_TABLE: !If
             - IsV2
             - !Ref ResponseCacheTable
             - ""
+          ALLOWED_ORIGINS: !Join [",", !Ref AllowedOrigins]
+          COGNITO_ISSUER: !If
+            - UseExternalCognito
+            - !Ref ExternalCognitoIssuer
+            - !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${CognitoUserPool}"
+          COGNITO_CLIENT_ID: !If
+            - UseExternalCognito
+            - !Ref ExternalCognitoClientId
+            - !Ref CognitoUserPoolClient
+          USER_RATE_LIMIT_PER_MINUTE: "30"
+          TENANT_RATE_LIMIT_PER_MINUTE: "120"
+          TICKET_TTL_SECONDS: "2592000"
           CONFIDENCE_THRESHOLD: "0.85"
           ARCHITECTURE: !If
             - IsV2
             - arm64
             - x86_64
           LOG_LEVEL: INFO
-      # SAM's `Policies` property accepts bare IAM documents (it names the
-      # generated inline policy itself); a {PolicyName, PolicyDocument} wrapper
-      # is rejected by the translator.
       Policies:
         - Version: "2012-10-17"
           Statement:
-            - Effect: Allow
+            - Sid: TicketsWriteAndTenantQuery
+              Effect: Allow
               Action:
                 - dynamodb:PutItem
-                - dynamodb:GetItem
                 - dynamodb:Query
-                - dynamodb:Scan
-                - dynamodb:UpdateItem
               Resource:
                 - !GetAtt TicketsTable.Arn
-                - !If
-                  - IsV2
+                - !Sub "${TicketsTable.Arn}/index/TenantIndex"
+            - Sid: RateLimitAtomicCounters
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:UpdateItem
+              Resource:
+                - !GetAtt RateLimitTable.Arn
+            - !If
+              - IsV2
+              - Sid: ResponseCacheReadWrite
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                Resource:
                   - !GetAtt ResponseCacheTable.Arn
-                  - !Ref AWS::NoValue
+              - !Ref AWS::NoValue
         - Version: "2012-10-17"
           Statement:
-            - Effect: Allow
+            - Sid: BedrockLeastPrivilegeInvoke
+              Effect: Allow
               Action:
                 - bedrock:InvokeModel
               Resource:
@@ -191,6 +371,8 @@ Resources:
             ApiId: !Ref HttpApi
             Path: /health
             Method: GET
+            Auth:
+              Authorizer: NONE
         StatsGet:
           Type: HttpApi
           Properties:
@@ -205,8 +387,106 @@ Resources:
       RetentionInDays: !Ref LogRetentionDays
 
   # ---------------------------------------------------------------------------
-  # Observability: EMF metrics land in ModelShield/Triage, dimensioned by
-  # StackVersion so v1 and v2 can be compared on one dashboard.
+  # Security Monitoring & Optional Cost-Gated AWS Audit Controls
+  # ---------------------------------------------------------------------------
+  TriageErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-lambda-errors"
+      AlarmDescription: Triggers on Lambda handler execution errors
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref TriageFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  Api5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-api-5xx"
+      AlarmDescription: Triggers on elevated API Gateway 5xx responses
+      Namespace: AWS/ApiGateway
+      MetricName: 5xx
+      Dimensions:
+        - Name: ApiId
+          Value: !Ref HttpApi
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  CloudTrailBucket:
+    Type: AWS::S3::Bucket
+    Condition: UseCloudTrail
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-cloudtrail-${AWS::AccountId}-${AWS::Region}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireAuditLogs90Days
+            Status: Enabled
+            ExpirationInDays: 90
+
+  CloudTrailBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Condition: UseCloudTrail
+    Properties:
+      Bucket: !Ref CloudTrailBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AWSCloudTrailAclCheck
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt CloudTrailBucket.Arn
+          - Sid: AWSCloudTrailWrite
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub "${CloudTrailBucket.Arn}/AWSLogs/${AWS::AccountId}/*"
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+
+  ModelShieldTrail:
+    Type: AWS::CloudTrail::Trail
+    Condition: UseCloudTrail
+    DependsOn: CloudTrailBucketPolicy
+    Properties:
+      TrailName: !Sub "${AWS::StackName}-trail"
+      IsLogging: true
+      S3BucketName: !Ref CloudTrailBucket
+      IncludeGlobalServiceEvents: false
+      IsMultiRegionTrail: false
+      EnableLogFileValidation: true
+
+  GuardDutyDetector:
+    Type: AWS::GuardDuty::Detector
+    Condition: UsePaidSecurityAddons
+    Properties:
+      Enable: true
+
+  # ---------------------------------------------------------------------------
+  # Observability: EMF metrics land in ModelShield/Triage
   # ---------------------------------------------------------------------------
   TriageDashboard:
     Type: AWS::CloudWatch::Dashboard
@@ -297,12 +577,26 @@ Outputs:
     Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com"
 
   HealthUrl:
-    Description: Health check endpoint
+    Description: Public minimal health check endpoint
     Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/health"
 
+  CognitoUserPoolId:
+    Condition: CreateCognitoPool
+    Description: Cognito User Pool ID for JWT issuance
+    Value: !Ref CognitoUserPool
+
+  CognitoClientId:
+    Condition: CreateCognitoPool
+    Description: Cognito App Client ID
+    Value: !Ref CognitoUserPoolClient
+
   TriageTableName:
-    Description: DynamoDB table holding triage records
+    Description: DynamoDB table holding tenant-scoped triage records
     Value: !Ref TicketsTable
+
+  RateLimitTableName:
+    Description: DynamoDB atomic counter table for rate limiting
+    Value: !Ref RateLimitTable
 
   ResponseCacheTableName:
     Condition: IsV2

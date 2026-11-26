@@ -107,7 +107,7 @@ def test_cache_hit_returns_without_any_model_call():
 
     outcome = router.route(ROUTINE)
 
-    assert outcome.triage == cached
+    assert outcome.triage == {**cached, "requires_human_review": False}
     assert outcome.telemetry["route_decision"] == "cache_hit"
     assert outcome.telemetry["cache_hit"] is True
     assert outcome.telemetry["estimated_cost_usd"] == 0.0

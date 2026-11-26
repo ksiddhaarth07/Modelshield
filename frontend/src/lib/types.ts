@@ -37,6 +37,8 @@ export interface TriageResult {
   severity: Severity;
   category: Category;
   confidence: number;
+  requires_human_review?: boolean;
+  security_flags?: string[];
   summary: string;
   draft_reply: string;
   telemetry: Telemetry;

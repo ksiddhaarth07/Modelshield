@@ -1,7 +1,28 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
   ModelShield Frontend. Private S3 static bucket + CloudFront Origin Access Control
-  (HTTPS edge delivery) pointing to the live ap-southeast-2 v1/v2 API Gateways.
+  (HTTPS edge delivery) with strict security response headers and optional WAFv2.
+
+Parameters:
+  WafWebAclArn:
+    Type: String
+    Default: ""
+    Description: Optional global (us-east-1) AWS WAFv2 WebACL ARN for CloudFront edge protection.
+
+  EnableCloudFrontWaf:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: Provision a rate-limited CloudFront WAFv2 WebACL when deployed in us-east-1.
+
+Conditions:
+  HasWafWebAcl: !Not [!Equals [!Ref WafWebAclArn, ""]]
+  CreateCloudFrontWaf: !And
+    - !Equals [!Ref EnableCloudFrontWaf, "true"]
+    - !Equals [!Ref "AWS::Region", "us-east-1"]
+    - !Equals [!Ref WafWebAclArn, ""]
 
 Resources:
   FrontendBucket:
@@ -27,6 +48,71 @@ Resources:
         SigningBehavior: always
         SigningProtocol: sigv4
 
+  FrontendResponseHeadersPolicy:
+    Type: AWS::CloudFront::ResponseHeadersPolicy
+    Properties:
+      ResponseHeadersPolicyConfig:
+        Name: !Sub "${AWS::StackName}-security-headers"
+        SecurityHeadersConfig:
+          StrictTransportSecurity:
+            AccessControlMaxAgeSec: 31536000
+            IncludeSubdomains: true
+            Preload: true
+            Override: true
+          ContentTypeOptions:
+            Override: true
+          FrameOptions:
+            FrameOption: DENY
+            Override: true
+          ReferrerPolicy:
+            ReferrerPolicy: strict-origin-when-cross-origin
+            Override: true
+          XSSProtection:
+            ModeBlock: true
+            Protection: true
+            Override: true
+          ContentSecurityPolicy:
+            ContentSecurityPolicy: "default-src 'self'; connect-src 'self' https://*.execute-api.ap-southeast-2.amazonaws.com https://cognito-idp.ap-southeast-2.amazonaws.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'"
+            Override: true
+
+  FrontendWebAcl:
+    Type: AWS::WAFv2::WebACL
+    Condition: CreateCloudFrontWaf
+    Properties:
+      Name: !Sub "${AWS::StackName}-cf-waf"
+      Scope: CLOUDFRONT
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub "${AWS::StackName}-cf-waf"
+      Rules:
+        - Name: AWSManagedRulesCommonRuleSet
+          Priority: 1
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: CommonRuleSet
+        - Name: EdgeRateLimit
+          Priority: 2
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              Limit: 1000
+              AggregateKeyType: IP
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: EdgeRateLimit
+
   FrontendDistribution:
     Type: AWS::CloudFront::Distribution
     Properties:
@@ -36,6 +122,13 @@ Resources:
         DefaultRootObject: index.html
         HttpVersion: http2
         PriceClass: PriceClass_All
+        WebACLId: !If
+          - HasWafWebAcl
+          - !Ref WafWebAclArn
+          - !If
+            - CreateCloudFrontWaf
+            - !GetAtt FrontendWebAcl.Arn
+            - !Ref "AWS::NoValue"
         Origins:
           - Id: S3Origin
             DomainName: !GetAtt FrontendBucket.RegionalDomainName
@@ -54,6 +147,7 @@ Resources:
           Compress: true
           # AWS Managed CachingOptimized policy
           CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          ResponseHeadersPolicyId: !Ref FrontendResponseHeadersPolicy
         CustomErrorResponses:
           - ErrorCode: 403
             ResponseCode: 200

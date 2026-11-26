@@ -27,9 +27,17 @@ from typing import Any, Dict, Optional, Sequence
 from botocore.config import Config
 
 from bedrock_client import NOVA_LITE, NOVA_PRO, BedrockClient, BedrockInvocationError, Invocation
-from cache import ResponseCache, build_cache_key
+from cache import ResponseCache, build_cache_key, is_personalized_or_sensitive
 from prompts import SYSTEM_PROMPT, build_user_prompt
-from schemas import CATEGORIES, SEVERITIES, ModelResponseError, parse_model_response
+from schemas import (
+    CATEGORIES,
+    SEVERITIES,
+    ModelResponseError,
+    apply_security_safeguards,
+    detect_prompt_injection,
+    parse_model_response,
+    sanitize_log_value,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -108,56 +116,73 @@ class AdaptiveRouter:
                 confidence_threshold = DEFAULT_CONFIDENCE_THRESHOLD
         self.confidence_threshold = confidence_threshold
 
-    def route(self, ticket: Dict[str, str]) -> RouteOutcome:
-        key = build_cache_key(ticket["subject"], ticket["body"])
+    def route(self, ticket: Dict[str, str], tenant_id: str = "default") -> RouteOutcome:
+        prompt_injected = detect_prompt_injection(ticket)
+        sensitive_ticket = is_personalized_or_sensitive(ticket["subject"], ticket["body"])
+        skip_cache = prompt_injected or sensitive_ticket
+        key = build_cache_key(ticket["subject"], ticket["body"], tenant_id=tenant_id)
+        safe_ticket_id = sanitize_log_value(ticket.get("ticket_id"))
 
-        cached = self._safe_cache_get(key)
-        if cached is not None and self._valid_payload(cached) and cached.get("severity") != "P1":
-            LOGGER.info("cache_hit ticket_id=%s", ticket["ticket_id"])
-            return RouteOutcome(
-                triage=cached,
-                telemetry=self._telemetry(
-                    route="cache_hit",
-                    model_id="cache",
-                    cache_hit=True,
-                    escalated=False,
-                    fallback=False,
-                    input_tokens=0,
-                    output_tokens=0,
-                    frontier_tokens=0,
-                    cost_usd=0.0,
-                ),
-            )
+        if not skip_cache:
+            cached = self._safe_cache_get(key)
+            if cached is not None and self._valid_payload(cached) and cached.get("severity") != "P1":
+                LOGGER.info("cache_hit ticket_id=%s", safe_ticket_id)
+                return RouteOutcome(
+                    triage=apply_security_safeguards(cached, ticket, prompt_injection_detected=False),
+                    telemetry=self._telemetry(
+                        route="cache_hit",
+                        model_id="cache",
+                        cache_hit=True,
+                        escalated=False,
+                        fallback=False,
+                        input_tokens=0,
+                        output_tokens=0,
+                        frontier_tokens=0,
+                        cost_usd=0.0,
+                    ),
+                )
 
-        if self._is_complex(ticket):
+        if prompt_injected or self._is_complex(ticket):
             invocation = self._call(self._pro, ticket)
-            triage = parse_model_response(invocation.text)
-            LOGGER.info("route=direct_pro ticket_id=%s", ticket["ticket_id"])
+            triage = apply_security_safeguards(
+                parse_model_response(invocation.text),
+                ticket,
+                prompt_injection_detected=prompt_injected,
+            )
+            LOGGER.info("route=direct_pro ticket_id=%s", safe_ticket_id)
             return self._store(
                 key,
                 RouteOutcome(
                     triage=triage,
                     telemetry=self._invocation_telemetry("direct_pro", invocation),
                 ),
+                skip_cache=skip_cache,
             )
 
         lite_invocation: Optional[Invocation] = None
         try:
             lite_invocation = self._call(self._lite, ticket)
-            lite_triage = parse_model_response(lite_invocation.text)
+            lite_triage = apply_security_safeguards(
+                parse_model_response(lite_invocation.text),
+                ticket,
+                prompt_injection_detected=False,
+            )
         except (BedrockInvocationError, ModelResponseError) as exc:
             LOGGER.warning(
-                "lite_path_failed ticket_id=%s error=%s detail=%s",
-                ticket["ticket_id"],
+                "lite_path_failed ticket_id=%s error=%s",
+                safe_ticket_id,
                 type(exc).__name__,
-                str(exc)[:120],
             )
-            return self._fallback(ticket, key, lite_invocation)
+            return self._fallback(ticket, key, lite_invocation, skip_cache=skip_cache)
 
         if self._needs_pro(lite_triage):
             pro_invocation = self._call(self._pro, ticket)
-            pro_triage = parse_model_response(pro_invocation.text)
-            LOGGER.info("route=escalated_pro ticket_id=%s", ticket["ticket_id"])
+            pro_triage = apply_security_safeguards(
+                parse_model_response(pro_invocation.text),
+                ticket,
+                prompt_injection_detected=False,
+            )
+            LOGGER.info("route=escalated_pro ticket_id=%s", safe_ticket_id)
             return self._store(
                 key,
                 RouteOutcome(
@@ -175,15 +200,17 @@ class AdaptiveRouter:
                         + pro_invocation.estimated_cost_usd,
                     ),
                 ),
+                skip_cache=skip_cache,
             )
 
-        LOGGER.info("route=nova_lite ticket_id=%s", ticket["ticket_id"])
+        LOGGER.info("route=nova_lite ticket_id=%s", safe_ticket_id)
         return self._store(
             key,
             RouteOutcome(
                 triage=lite_triage,
                 telemetry=self._invocation_telemetry("nova_lite", lite_invocation),
             ),
+            skip_cache=skip_cache,
         )
 
     def _needs_pro(self, triage: Dict[str, Any]) -> bool:
@@ -210,15 +237,17 @@ class AdaptiveRouter:
         ticket: Dict[str, str],
         key: str,
         lite_invocation: Optional[Invocation],
+        *,
+        skip_cache: bool = False,
     ) -> RouteOutcome:
         pro_invocation = self._call(self._pro, ticket)
-        triage = parse_model_response(pro_invocation.text)
+        triage = apply_security_safeguards(parse_model_response(pro_invocation.text), ticket)
 
         lite_cost = lite_invocation.estimated_cost_usd if lite_invocation else 0.0
         lite_input = lite_invocation.input_tokens if lite_invocation else 0
         lite_output = lite_invocation.output_tokens if lite_invocation else 0
 
-        LOGGER.info("route=fallback_pro ticket_id=%s", ticket["ticket_id"])
+        LOGGER.info("route=fallback_pro ticket_id=%s", sanitize_log_value(ticket.get("ticket_id")))
         return self._store(
             key,
             RouteOutcome(
@@ -235,6 +264,7 @@ class AdaptiveRouter:
                     cost_usd=lite_cost + pro_invocation.estimated_cost_usd,
                 ),
             ),
+            skip_cache=skip_cache,
         )
 
     def _invocation_telemetry(self, route: str, invocation: Invocation) -> Dict[str, Any]:
@@ -303,10 +333,16 @@ class AdaptiveRouter:
             LOGGER.warning("cache_read_unexpected error=%s", type(exc).__name__)
             return None
 
-    def _store(self, key: str, outcome: RouteOutcome) -> RouteOutcome:
-        # A live P1 must never be replayed from a 24 h cache.
-        if outcome.triage.get("severity") == "P1":
-            LOGGER.info("cache_skip_p1")
+    def _store(
+        self, key: str, outcome: RouteOutcome, *, skip_cache: bool = False
+    ) -> RouteOutcome:
+        # A live P1 or personalized/sensitive ticket must never be cached.
+        if skip_cache or outcome.triage.get("severity") == "P1":
+            LOGGER.info("cache_skip reason=%s", "sensitive_or_injection" if skip_cache else "p1")
+            return outcome
+        reply_text = str(outcome.triage.get("draft_reply") or "")
+        if is_personalized_or_sensitive("", "", draft_reply=reply_text):
+            LOGGER.info("cache_skip reason=personalized_reply")
             return outcome
         try:
             self._cache.put(key, outcome.triage)

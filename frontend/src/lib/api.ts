@@ -1,6 +1,33 @@
 import type { Health, ReplayOutcome, Ticket, TriageResult } from "./types";
 
 const REQUEST_TIMEOUT_MS = 45_000;
+const TOKEN_STORAGE_KEY = "modelshield_session_jwt";
+
+let inMemorySessionToken: string | null = null;
+
+export function setSessionToken(token: string | null): void {
+  const cleaned = token?.trim() ?? "";
+  inMemorySessionToken = cleaned.length > 0 ? cleaned : null;
+  try {
+    if (inMemorySessionToken) {
+      window.sessionStorage.setItem(TOKEN_STORAGE_KEY, inMemorySessionToken);
+    } else {
+      window.sessionStorage.removeItem(TOKEN_STORAGE_KEY);
+    }
+  } catch {
+    // Ignore storage errors in restricted contexts; in-memory token remains active.
+  }
+}
+
+export function getSessionToken(): string | null {
+  if (inMemorySessionToken) return inMemorySessionToken;
+  try {
+    const stored = window.sessionStorage.getItem(TOKEN_STORAGE_KEY);
+    return stored && stored.trim().length > 0 ? stored.trim() : null;
+  } catch {
+    return null;
+  }
+}
 
 export class ApiError extends Error {
   readonly status?: number;
@@ -47,11 +74,17 @@ export async function requestTriage(
   baseUrl: string,
   ticket: Pick<Ticket, "ticket_id" | "subject" | "body">,
   signal?: AbortSignal,
+  authToken?: string,
 ): Promise<TriageResult> {
   return withTimeout(signal, async (inner) => {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const token = (authToken ?? getSessionToken() ?? "").trim();
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
     const response = await fetch(`${baseUrl}/triage`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({
         ticket_id: ticket.ticket_id,
         subject: ticket.subject,
@@ -62,7 +95,7 @@ export async function requestTriage(
 
     const text = await response.text();
     if (!response.ok) {
-      throw new ApiError(`triage returned HTTP ${response.status}: ${text.slice(0, 180)}`, response.status);
+      throw new ApiError(`triage returned HTTP ${response.status}`, response.status);
     }
     try {
       return JSON.parse(text) as TriageResult;
@@ -78,6 +111,7 @@ interface ReplayOptions {
   concurrency: number;
   signal?: AbortSignal;
   pacingMs?: number;
+  authToken?: string;
   onResult?: (result: TriageResult, completed: number) => void;
   onFailure?: (ticket: Ticket, error: unknown, completed: number) => void;
 }
@@ -109,6 +143,7 @@ export async function replayStack({
   concurrency,
   signal,
   pacingMs = 2000,
+  authToken,
   onResult,
   onFailure,
 }: ReplayOptions): Promise<ReplayOutcome> {
@@ -127,7 +162,7 @@ export async function replayStack({
       if (!ticket) return;
       try {
         await pacer.wait();
-        const result = await requestTriage(baseUrl, ticket, signal);
+        const result = await requestTriage(baseUrl, ticket, signal, authToken);
         results.push(result);
         completed += 1;
         onResult?.(result, completed);

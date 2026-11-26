@@ -21,6 +21,7 @@ import argparse
 import asyncio
 import json
 import math
+import os
 import sys
 import time
 from collections import Counter
@@ -263,10 +264,15 @@ async def run_stack(
         max_connections=concurrency, max_keepalive_connections=concurrency
     )
 
+    client_headers: Dict[str, str] = {"Content-Type": "application/json"}
+    auth_token = os.environ.get("MODELSHIELD_AUTH_TOKEN", "").strip()
+    if auth_token:
+        client_headers["Authorization"] = f"Bearer {auth_token}"
+
     async with httpx.AsyncClient(
         limits=limits,
         timeout=timeout,
-        headers={"Content-Type": "application/json"},
+        headers=client_headers,
     ) as client:
         health = await healthcheck(client, base_url)
         if health is None:

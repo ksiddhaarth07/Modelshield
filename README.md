@@ -1,135 +1,190 @@
 # ModelShield
 
-**A self-optimising, serverless AI incident-triage gateway on AWS.**
-`API Gateway → Lambda → Amazon Bedrock → DynamoDB → CloudWatch`, deployed twice
-(`modelshield-v1` vs `modelshield-v2`) so the cost, latency and sustainability
-delta can be measured live on the same 100-ticket benchmark.
+> **Self-optimising, security-hardened serverless AI incident-triage gateway on AWS.**
+> Built with `API Gateway → Lambda → Amazon Bedrock → DynamoDB → CloudWatch`, running `v1-before` (100% Amazon Nova Pro) side by side against `v2-after` (DynamoDB TTL cache + confidence-gated Nova Lite → Nova Pro router) on `arm64` Graviton.
 
-ModelShield is a worked example of a problem almost every production GenAI
-backend has: **every ticket goes to the most expensive model, forever.** The v1
-stack is that conventional baseline. The v2 stack adds a fail-open DynamoDB TTL
-cache and a confidence-gated Nova Lite → Nova Pro router, then proves the
-result instead of asserting it.
+[![AWS Serverless](https://img.shields.io/badge/AWS-Serverless%20(SAM)-FF9900?style=flat-square&logo=amazonaws&logoColor=white)](infra/template.yaml)
+[![Amazon Bedrock](https://img.shields.io/badge/Amazon%20Bedrock-Nova%20Lite%20%E2%86%92%20Pro-232F3E?style=flat-square)](backend/src/router.py)
+[![Security CI](https://img.shields.io/github/actions/workflow/status/ksiddhaarth07/Modelshield/security.yml?label=Security%20CI&style=flat-square)](.github/workflows/security.yml)
+[![Tests](https://img.shields.io/badge/pytest-90%20passed-16a34a?style=flat-square)](backend/tests/)
+[![WAR High Findings](https://img.shields.io/badge/WAR%20High%20Findings-9%20%E2%86%92%200-0ea5e9?style=flat-square)](docs/war-diff.md)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
 
-## Before / After
+🌐 **Live CloudFront Demo:** https://d1856jwkm5m4pg.cloudfront.net
 
-| Dimension | `v1-before` | `v2-after` |
+![ModelShield Dashboard Preview](docs/images/ui-dashboard.jpg)
+
+---
+
+## Overview
+
+**ModelShield** is a production-minded AWS serverless AI incident-triage gateway designed to eliminate unnecessary frontier LLM spend while preserving 100% critical incident recall (`P1`) and enforcing defense-in-depth cloud and application security.
+
+Instead of asserting theoretical savings, ModelShield deploys two identical-contract API stacks in `ap-southeast-2` (`modelshield-v1` and `modelshield-v2`) and evaluates both live against the same **100-ticket labelled benchmark**, streaming telemetry into CloudWatch Embedded Metric Format (EMF) dashboards and a dark-mode React benchmarking console.
+
+---
+
+## Problem & Solution
+
+### The Problem
+Most enterprise GenAI APIs follow an unoptimised default pattern:
+- **Always-on frontier inference:** Every routine support or how-to ticket goes to the largest, most expensive model (`Nova Pro`).
+- **No semantic/normalised repeat caching:** Alert storms and duplicate tickets re-bill the same LLM call repeatedly.
+- **Over-provisioned compute & missing spend guardrails:** Fixed `x86_64` memory footprints, missing per-tenant rate limits, wildcard CORS, and zero prompt-injection/output guardrails expose teams to cost spikes and data leakage.
+
+### The Solution
+ModelShield introduces an **adaptive, multi-stage routing pipeline (`v2`)** backed by hardened serverless controls:
+1. **Normalised Tenant-Scoped TTL Cache:** Strips volatile ticket IDs, UUIDs, ISO timestamps, case, and whitespace, then keys by verified `tenant_id` in DynamoDB (`24h TTL`, `$0.00` inference cost on repeat hits), while automatically skipping PII/credential payloads.
+2. **Deterministic Complexity & P1 Security Gate:** Routes high-risk keywords, `CRITICAL_P1_SIGNALS`, long tickets (`> 900` chars), and detected prompt-injection payloads straight to **Amazon Nova Pro** in 1 hop.
+3. **Confidence-Gated Escalation:** Handles routine tickets on **Amazon Nova Lite** (`$0.06 / $0.24` per 1M tokens) and deterministically escalates `P1`, `P3/how_to`, or low-confidence (`< 0.85`) results to Nova Pro.
+4. **Full Security & Supply-Chain Hardening:** Cognito JWT authentication, admin-only RBAC on `/stats`, per-user & per-tenant rate limiting, prompt-injection delimiting, deterministic `P1` security escalation + `requires_human_review`, and automated CI security gates.
+
+---
+
+## Key Features
+
+- **Two-Tier Adaptive Model Router (`Nova Lite → Nova Pro`):** Slashes frontier token usage by **87.97%** while keeping **100% P1 recall (`11/11`)**.
+- **Tenant-Isolated Fail-Open DynamoDB Cache:** Normalised SHA-256 cache keys scoped by verified JWT `tenant_id`, with automatic PII/credential cache bypass and DynamoDB failure tolerance.
+- **Defense-in-Depth Auth & RBAC (`auth.py`):** Amazon Cognito JWT validation (RS256 JWKS signature, `iss`, `aud`/`client_id`, `exp`, `nbf`, scopes, admin roles) protecting `POST /triage` and `GET /stats`, with minimal public `GET /health` and body identity anti-spoofing.
+- **Abuse & Bedrock Cost Protection (`rate_limit.py`):** Per-user and per-tenant atomic DynamoDB counters (`429 Retry-After`), strict HTTP body byte caps (`413`), API Gateway route throttling, and Lambda reserved concurrency.
+- **AI Prompt-Injection & Output Guardrails (`prompts.py`, `schemas.py`):** Neutralised `<untrusted_ticket_*>` delimiters, injection detection, deterministic `P1` security override, `requires_human_review` flags, and secret/system-prompt leak blocking.
+- **Zero-Extra-Cost Observability:** CloudWatch EMF (`ModelShield/Triage`) captures exact route costs, latency, GB-seconds, cache hits, and escalations without extra `PutMetricData` API fees.
+- **Docker-Free `arm64` Packaging:** Pure Python stdlib + managed `boto3` runtime enables cross-platform `sam build` on Windows and Linux without Docker.
+
+---
+
+## System Architecture
+
+```text
+                           ┌───────────────────────────────────────────────┐
+   POST /triage (JWT)      │ AWS API Gateway (HTTP API v2)                 │
+   GET  /health (Public) ─▶│ Cognito JWT Authorizer · Strict CORS          │
+   GET  /stats  (Admin)    │ Throttling (25 req/s, burst 50) · Access Logs │
+                           └───────────────────────┬───────────────────────┘
+                                                   │
+                                        ┌──────────▼───────────┐
+                                        │ AWS Lambda (py3.13)  │
+                                        │ arm64 · 256 MB (v2)  │
+                                        │ Auth · Rate Limit    │
+                                        │ Prompt Guardrails    │
+                                        └──────────┬───────────┘
+                                                   │
+               ┌───────────────────────────────────┼───────────────────────────────────┐
+               │                                   │                                   │
+      ┌────────▼────────┐                ┌─────────▼─────────┐               ┌─────────▼─────────┐
+      │ ResponseCache   │                │ Complexity & P1   │               │ Amazon Bedrock    │
+      │ DynamoDB (24h)  │                │ Security Gate     │               │ Nova Lite / Pro   │
+      │ Tenant-scoped   │                │ Guardrails        │               │ Converse API      │
+      └─────────────────┘                └───────────────────┘               └───────────────────┘
+               │
+      ┌────────▼────────┐                ┌───────────────────┐               ┌───────────────────┐
+      │ TicketsTable    │                │ RateLimitTable    │               │ CloudWatch EMF    │
+      │ 30d TTL · PITR  │                │ Atomic TTL quotas │               │ ModelShield/Triage│
+      └─────────────────┘                └───────────────────┘               └───────────────────┘
+```
+
+More architectural details and trade-offs are documented in [docs/architecture.md](docs/architecture.md) and [SECURITY.md](SECURITY.md).
+
+---
+
+## Technology Stack
+
+| Layer | Technologies |
+| --- | --- |
+| **Compute & API** | AWS Lambda (`python3.13`, `x86_64` v1 / `arm64` Graviton v2), Amazon API Gateway HTTP API v2 |
+| **Generative AI** | Amazon Bedrock Converse API (`apac.amazon.nova-pro-v1:0` & `apac.amazon.nova-lite-v1:0`) |
+| **Data & Caching** | Amazon DynamoDB (`PAY_PER_REQUEST`, SSE, PITR, TTL, `TenantIndex` GSI) |
+| **Security & Auth** | Amazon Cognito JWT Authorizer, pure-stdlib RS256/HS256 verifier, atomic rate limiter, optional CloudTrail / GuardDuty / CloudFront WAFv2 |
+| **Frontend Deck** | React 18, TypeScript, Vite 7, Framer Motion, Recharts, Lucide, S3 + CloudFront OAC |
+| **IaC & DevSecOps** | AWS SAM, GitHub Actions (`CodeQL`, `Gitleaks`, `Bandit`, `pip-audit`, `npm audit`), Dependabot |
+| **Testing** | `pytest` (90 unit, contract & security tests), async `httpx` 100-ticket benchmark runner |
+
+---
+
+## AWS Well-Architected Review
+
+A structured **AWS Well-Architected Review** covering **47 Best Practices** across **Cost Optimization (33 BPs)** and **Sustainability (14 BPs)** was executed against live deployed stacks in `ap-southeast-2`:
+
+- **Baseline Review:** [docs/war-before.md](docs/war-before.md) — Identified 9 High findings (100% frontier inference, missing repeat cache, unthrottled API, x86_64/512 MB compute, unretained logs/data).
+- **Remediated Review:** [docs/war-after.md](docs/war-after.md) & [docs/war-diff.md](docs/war-diff.md) — **9/9 High findings resolved (`9 → 0`)**, **9 Best Practices flipped** (`5 → 10 Implemented`, `23 → 25 Partially Implemented`, `14 → 7 Not Implemented`).
+- **Key Flipped BPs:** `COST05-BP05`, `COST06-BP02`, `COST08-BP02`, `COST10-BP02`, `SUS02-BP03`, `SUS03-BP01`, `SUS03-BP02`, `SUS03-BP03`, `SUS03-BP04`.
+
+---
+
+## Improvements: Before & After
+
+| Dimension | `v1-before` (Baseline) | `v2-after` (Adaptive + Hardened) |
 | --- | --- | --- |
-| Compute | Lambda `python3.13`, **x86_64**, **512 MB** | Lambda `python3.13`, **arm64**, **256 MB** |
-| Routing | 100% synchronous Nova Pro | TTL cache → complexity gate → Nova Lite → confidence/P1 escalation to Nova Pro |
-| Repeat traffic | Full frontier inference every time | Normalised SHA-256 key, DynamoDB **24h TTL**, `$0.00` model cost |
-| API protection | HTTP API + CORS | HTTP API + CORS + **25 req/s, burst 50** |
-| Data | `TicketsTable` | `TicketsTable` + `ResponseCacheTable` |
-| Failure mode | Provider error → 502 | Cache fail-open; Lite error → Pro fallback; Pro error → 502 |
-| Observability | EMF + CloudWatch dashboard | Same, plus cache/escalation/fallback counters |
-| Package | Pure stdlib + runtime boto3 (no native wheels) | Same, which is what makes the Docker-free arm64 build possible |
+| **Compute Profile** | Lambda `python3.13`, **x86_64**, **512 MB** | Lambda `python3.13`, **arm64 Graviton**, **256 MB** |
+| **Inference Routing** | 100% synchronous Amazon Nova Pro | Normalised cache → complexity/P1 gate → Nova Lite → Pro escalation |
+| **Repeat Alerts** | Billed at full Nova Pro token rate every time | Tenant-scoped DynamoDB **24h TTL** hit (`$0.00` Bedrock cost) |
+| **Authentication & RBAC** | Added Cognito JWT + admin `/stats` RBAC | Cognito JWT + admin `/stats` RBAC + body identity anti-spoofing |
+| **Abuse & Spend Caps** | Added route throttling + per-user/tenant quotas | **25 req/s (burst 50)** + per-user/tenant quotas + reserved concurrency |
+| **Data Lifecycle** | `TicketsTable` (30d TTL + PITR + `TenantIndex` Query) | `TicketsTable` + `ResponseCacheTable` (24h TTL) + `RateLimitTable` |
+| **Resilience** | Bedrock failure → `502` | Cache fail-open; Lite error → Pro fallback; Pro error → `502` |
 
-Measured headline numbers from `eval/results/benchmark_report.json` (`ap-southeast-2`, 100 tickets, concurrency 2, pacing 2.5 s):
+---
 
-| Metric | `v1-before` | `v2-after` | Delta |
+## Results & Validation
+
+### Live 100-Ticket AWS Benchmark (`ap-southeast-2`)
+Measured across 100 labelled tickets in [eval/results/benchmark_report.json](eval/results/benchmark_report.json) (concurrency `2`, pacing `2.5 s`, including 11 ground-truth `P1` incidents and 20 repeat burst alerts):
+
+| Metric | `v1-before` | `v2-after` | Improvement |
 | --- | --- | --- | --- |
-| Accuracy | **94.0%** | **92.0%** | `-2.00 pp` |
-| P1 Recall | **100%** (`11/11`) | **100%** (`11/11`) | `0.00 pp` |
-| Cost / 10K Tickets | `$18.6717` | **`$3.3000`** | **`-82.33%`** |
-| Cost / Successful Ticket | `$0.001986` | **`$0.000359`** | **`-81.94%`** |
-| p95 Latency | `929 ms` | **`815 ms`** | **`-12.28%`** |
-| Frontier Tokens | `209,426` | **`25,202`** | **`-87.97%`** |
-| Lambda GB-Seconds | `36.7620` | **`13.6749`** | **`-62.80%`** |
-| Cache Hits / Escalations / Fallbacks | `0 / 0 / 0` | **`15 / 1 / 0`** | `+15 cache hits` |
+| **P1 Recall** | **100%** (`11/11`) | **100%** (`11/11`) | **Preserved (`0.00 pp`)** |
+| **Accuracy** | **94.0%** | **92.0%** | `-2.00 pp` |
+| **Cost / 10K Tickets** | `$18.6717` | **`$3.3000`** | **`-82.33%`** |
+| **Cost / Successful Ticket** | `$0.001986` | **`$0.000359`** | **`-81.94%`** |
+| **p95 Latency** | `929 ms` | **`815 ms`** | **`-12.28%`** |
+| **Frontier Tokens Used** | `209,426` | **`25,202`** | **`-87.97%`** |
+| **Lambda GB-Seconds** | `36.7620` | **`13.6749`** | **`-62.80%`** |
+| **Cache Hits / Escalations / Fallbacks** | `0 / 0 / 0` | **`15 / 1 / 0`** | **`+15` cache hits** |
 
-## Architecture
+### Offline Tests & Security Verification
+- **`pytest` Test Suite (`backend/tests/`):** **90 passed in 0.91s** (unit, router, schema contracts, and 22 security tests covering auth, RBAC, tenant isolation, rate-limit bypasses, `413` oversized payloads, malformed JSON, prompt injection, cache isolation, and log sanitization).
+- **SAST (`bandit -r src`):** **0 issues** (`High: 0, Medium: 0, Low: 0`).
+- **Dependency Audits:** **0 vulnerabilities** (`npm audit` clean on Vite 7 frontend; `pip-audit` clean on runtime & Python 3.13/3.14 dev dependencies).
+- **Secret Scan (`git log --all`):** **0 leaked credentials** detected across Git history.
 
-```
-                         ┌──────────────────────────────┐
-   POST /triage          │  API Gateway HTTP API (CORS)  │
-   GET  /health   ──────▶│  v2 adds 25 r/s + burst 50    │
-   GET  /stats           └──────────────┬───────────────┘
-                                        │
-                              ┌─────────▼─────────┐
-                              │  Lambda python3.13 │
-                              │  x86_64 512MB (v1) │
-                              │  arm64  256MB (v2) │
-                              └─────────┬─────────┘
-                                        │
-              ┌─────────────────────────┼─────────────────────────┐
-              │                         │                         │
-     ┌────────▼────────┐      ┌─────────▼─────────┐     ┌─────────▼─────────┐
-     │ ResponseCache   │      │  Complexity gate  │     │  Amazon Bedrock   │
-     │ DynamoDB, 24h   │      │  keywords + size  │     │  Nova Lite / Pro  │
-     │ fail-open (v2)  │      └───────────────────┘     └───────────────────┘
-     └─────────────────┘
-              │
-     ┌────────▼────────┐      ┌────────────────────┐
-     │  TicketsTable   │      │ CloudWatch EMF     │
-     │  DynamoDB       │      │ ModelShield/Triage │
-     └─────────────────┘      └────────────────────┘
-```
+---
 
-Every request emits one CloudWatch EMF document (namespace
-`ModelShield/Triage`, dimension `StackVersion`) and the SAM template provisions
-the dashboard that plots average cost, p95 latency, frontier tokens, cache hits,
-escalations and GB-seconds side by side.
+## Demo
 
-## API
+🌐 **Live CloudFront Deck:** https://d1856jwkm5m4pg.cloudfront.net
 
-`POST /triage`
+| Executive Dashboard | Live Split Replay | Well-Architected Audit |
+| :---: | :---: | :---: |
+| ![Executive Dashboard](docs/images/ui-dashboard.jpg) | ![Live Split Replay](docs/images/ui-live-replay.jpg) | ![Well-Architected Audit](docs/images/ui-war-audit.jpg) |
+| Live route distribution, cost delta & monthly ROI slider | Side-by-side `v1` vs `v2` replay with `$0.000000` cache hits | `ap-southeast-2` 3D pipeline & 9 flipped WAR Best Practices |
 
-```json
-{
-  "ticket_id": "tkt-042",
-  "subject": "Checkout webhooks timing out after regional failover",
-  "body": "Multiple enterprise tenants report 503 errors on payment confirmation webhooks since 04:12 UTC..."
-}
-```
+*(Note: After pulling the latest security hardening commits, redeploy `infra/template.yaml` and `infra/frontend.yaml` to activate Cognito JWT enforcement, `RateLimitTable`, and CloudFront security response headers in AWS.)*
 
-```json
-{
-  "ticket_id": "tkt-042",
-  "severity": "P1",
-  "category": "incident",
-  "confidence": 0.96,
-  "summary": "Regional failover causing 503 timeouts on enterprise payment webhooks.",
-  "draft_reply": "We have escalated this P1 payment webhook outage to our on-call SRE team...",
-  "telemetry": {
-    "stack_version": "v1",
-    "route_decision": "single_heavy",
-    "model_id": "apac.amazon.nova-pro-v1:0",
-    "cache_hit": false,
-    "escalated": false,
-    "fallback_triggered": false,
-    "input_tokens": 286,
-    "output_tokens": 114,
-    "frontier_tokens_used": 400,
-    "estimated_cost_usd": 0.0005936,
-    "latency_ms": 1140,
-    "lambda_memory_mb": 512,
-    "lambda_gb_seconds": 0.57,
-    "architecture": "x86_64"
-  }
-}
-```
+---
 
-`severity` ∈ `P1..P4`; `category` ∈ `incident, security, billing, account, how_to, bug`;
-`route_decision` ∈ `single_heavy, cache_hit, nova_lite, escalated_pro, direct_pro, fallback_pro`.
+## Getting Started
 
-`GET /health` is a dependency-free liveness probe. `GET /stats` scans
-`TicketsTable` and returns severity/category rollups, p95 latency, spend and
-cache/escalation counts.
-
-## Deploy
-
-Prerequisites: AWS CLI v2 with credentials, SAM CLI, and Bedrock model access to
-`apac.amazon.nova-pro-v1:0` (and `apac.amazon.nova-lite-v1:0` for v2) in `ap-southeast-2`.
+### 1. Run Backend & Security Test Suite (Offline)
 
 ```powershell
-# v1 (x86_64 / Nova Pro baseline)
-./deploy.ps1 -Env v1
-
-# v2 (arm64 / cache + adaptive router)
-./deploy.ps1 -Env v2
+cd backend
+python -m pip install -r requirements-dev.txt
+python -m pytest -v
+bandit -r src -q
 ```
 
-Or by hand:
+### 2. Run the Frontend Benchmark Deck Locally
+
+```powershell
+cd frontend
+Copy-Item .env.example .env.local   # Set public VITE_V1_API_URL and VITE_V2_API_URL only
+npm install
+npm run dev
+```
+
+### 3. Deploy to AWS (`ap-southeast-2`)
+
+Prerequisites: AWS CLI v2, AWS SAM CLI, and Bedrock model access for `apac.amazon.nova-pro-v1:0` and `apac.amazon.nova-lite-v1:0`.
 
 ```powershell
 sam build --template-file infra/template.yaml --config-file infra/samconfig.toml
@@ -137,114 +192,27 @@ sam deploy --config-env v1 --config-file infra/samconfig.toml --template-file .a
 sam deploy --config-env v2 --config-file infra/samconfig.toml --template-file .aws-sam/build/template.yaml
 ```
 
-Both stacks are 100% on-demand serverless, so idle cost is effectively zero.
-`./deploy.ps1` prints the stack outputs (`ApiUrl`, `HealthUrl`,
-`TriageTableName`, `DashboardName`).
-
-## Benchmark
-
-`eval/dataset_100_tickets.json` holds 100 hand-labelled tickets: 55 routine
-tier-1, 20 repeat/alert-burst tickets (five canonical incidents repeated four
-times with different IDs, timestamps and whitespace) and 25 complex tier-2 /
-critical tickets, including 11 ground-truth P1s.
+### 4. Execute the 100-Ticket Live Benchmark
 
 ```powershell
 python eval/run_benchmark.py --validate-only
+$env:MODELSHIELD_AUTH_TOKEN = "<your-cognito-jwt>"
 python eval/run_benchmark.py --v1-url $V1 --v2-url $V2 --concurrency 2 --pacing 2.5
 ```
 
-The runner replays both stacks with concurrency capped at 2 (and pacing ≥ 1.5 s) and
-reports accuracy, severity/category accuracy, P1 recall and precision, p95
-latency, exact spend, cost per successful ticket, GB-seconds, frontier tokens,
-cache/escalation/fallback counts, a v1↔v2 disagreement diff and regression list.
-A non-200 or off-contract response counts as a miss — it is never dropped.
+---
 
-The five repeat groups collapse to five normalised cache keys, so a cold run
-produces 15 real cache hits out of 20 repeat tickets. Stage 1's deterministic
-complexity gate routes unambiguous active P1s (`CRITICAL_P1_SIGNALS` / multi-signal
-outages) straight to Nova Pro in 1 hop (`direct_pro`), while routine tickets take
-Nova Lite and borderline predictions escalate via the confidence/P1 guardrail.
+## Future Scope
 
-## Live deck
+- **Semantic Vector Caching:** Add embedding-based similarity lookup alongside exact normalised SHA-256 keys to capture paraphrased incident bursts.
+- **Automated Cognito Hosted UI Flow in Deck:** Wire PKCE OAuth login directly into the React `Settings` tab alongside runtime session tokens.
+- **AWS Budgets & SNS Alerting Actions:** Bind `AWS::Budgets::Budget` thresholds directly to automatic Slack/PagerDuty notifications.
+- **Multi-Region Bedrock Failover:** Expand cross-region inference fallback and multi-region active-passive DynamoDB global tables.
 
-```powershell
-cd frontend
-Copy-Item .env.example .env.local   # set VITE_V1_API_URL and VITE_V2_API_URL
-npm install
-npm run dev
-```
+---
 
-The deck is a responsive dark obsidian glassmorphic viewport (`Dashboard`,
-`Live Replay`, `WAR Audit`, `Settings`): stack health, `V2 Route Distribution`,
-`v1-before` vs `v2-after` glass cards, `Live Telemetry` chart, `Efficiency & Recall`
-radial ring, the 10K→5M monthly ROI slider, `WAR Maturity` summary, and the
-Well-Architected 3D pipeline + delta trace. It talks to the same contract as the
-benchmark and caps each stack at 2 in-flight requests.
+## Contributors & License
 
-## Well-Architected review
-
-[docs/war-before.md](docs/war-before.md) is the baseline review: 47 in-scope
-Best Practices across Sustainability (14) and Cost Optimization (33), acquired
-from the live framework corpus at review time, with `path:line` evidence for
-every finding. Headline gaps: 100% frontier routing (COST05-BP05), no repeat
-cache (SUS03-BP01), fixed x86_64/512 MB (COST06-BP02), no request ceiling
-(COST08-BP02) and a heavy model for every task class (SUS03-BP03).
-
-## Local development
-
-```powershell
-cd backend
-python -m pip install -r requirements-dev.txt
-python -m pytest          # 68 tests, no AWS calls
-```
-
-The Lambda handler is framework-free and covered with a fake Bedrock client, so
-validation, telemetry, persistence-failure and model-output-recovery paths are
-all tested offline. Architecture and trade-offs are in
-[docs/architecture.md](docs/architecture.md).
-
-## Repository layout
-
-```
-infra/template.yaml       SAM: HTTP API, Lambda, DynamoDB, IAM, logs, dashboard
-infra/samconfig.toml      [v1] and [v2] deployment profiles
-backend/src/handler.py    routing + response contract
-backend/src/schemas.py    request validation + defensive output parsing
-backend/src/prompts.py    deterministic triage prompt
-backend/src/bedrock_client.py  Converse wrapper, jittered retries, exact USD cost
-backend/src/storage.py    DynamoDB writes + /stats rollup
-backend/src/metrics.py    CloudWatch EMF emitter
-backend/tests/            offline contract + handler tests
-eval/                     100-ticket benchmark (dataset + async runner)
-frontend/                 live benchmark deck (React + TS + Vite)
-docs/                     Well-Architected before/after reports and diff
-```
-
-## Design notes
-
-- **Fail-open by default.** Cache read/write and ticket persistence degrade to a
-  logged warning; only a failed model call produces a 5xx.
-- **Honest accounting.** An escalated request is billed as Lite + Pro tokens,
-  not as Lite. Cost per *successful* ticket is the headline metric, not cost per
-  request.
-- **Least privilege.** The role can `InvokeModel` on exactly one inference
-  profile and its foundation-model ARN, and can touch exactly one table.
-- **No Docker.** Zero native wheels means `sam build` produces an arm64 zip
-  anywhere, including Windows.
-
-## Status
-
-- `v1-before` implemented and unit-tested; template validates and builds.
-- 100-ticket benchmark, async runner and baseline Well-Architected review are
-  committed ([docs/war-before.md](docs/war-before.md)).
-- The live deck typechecks and produces a production bundle
-  (`frontend` → `npm run build`).
-- `v2-after` is implemented on `feat/war-tiered-model-router`: fail-open TTL
-  cache (`Decimal` serialization), 1-hop `CRITICAL_P1_SIGNALS` gate + confidence/P1
-  guardrail on Nova Lite → Pro, arm64/256 MB, and API throttling. **68 tests**
-  green; both `v1` and `v2` template profiles validate and build.
-- Both stacks are deployed live in `ap-southeast-2` (`modelshield-v1` and
-  `modelshield-v2`), with `eval/results/benchmark_report.json` showing **82.33%**
-  cost/10K reduction, **12.28%** p95 latency reduction, **87.97%** frontier tokens
-  avoided, **100%** P1 recall, and **15** live DynamoDB cache hits (`0` errors,
-  `0` fallbacks).
+- **Author:** Siddhaarth K ([@ksiddhaarth07](https://github.com/ksiddhaarth07))
+- **Security Policy:** See [SECURITY.md](SECURITY.md)
+- **License:** MIT — see [LICENSE](LICENSE)

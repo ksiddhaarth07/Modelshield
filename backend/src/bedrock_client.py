@@ -173,7 +173,8 @@ class BedrockClient:
             delay = min(
                 0.5,
                 (self.base_backoff_seconds * (2 ** (attempt - 1)))
-                + random.uniform(0, self.base_backoff_seconds),
+                # Non-cryptographic retry backoff jitter only.
+                + random.uniform(0, self.base_backoff_seconds),  # nosec B311
             )
             LOGGER.warning(
                 "bedrock_retry model=%s attempt=%s delay_ms=%s error=%s",

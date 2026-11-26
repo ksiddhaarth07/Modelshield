@@ -9,17 +9,20 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from decimal import Decimal
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 import boto3
+from boto3.dynamodb.conditions import Attr, Key
 from botocore.exceptions import BotoCoreError, ClientError
 
-from schemas import CATEGORIES, SEVERITIES
+from schemas import CATEGORIES, SEVERITIES, sanitize_log_value
 
 LOGGER = logging.getLogger(__name__)
 
 MAX_SCAN_PAGES = 50
+DEFAULT_TICKET_TTL_SECONDS = 30 * 24 * 60 * 60
 _TABLE_CACHE: Dict[str, Any] = {}
 
 
@@ -52,16 +55,33 @@ def _to_ddb(value: Any) -> Any:
     return value
 
 
-def save_triage(record: Dict[str, Any], table: Optional[Any] = None) -> bool:
-    """Persist one triage record. Returns ``False`` on a swallowed write error."""
+def _ticket_ttl_seconds() -> int:
+    raw = os.environ.get("TICKET_TTL_SECONDS", "").strip()
+    if not raw:
+        return DEFAULT_TICKET_TTL_SECONDS
+    try:
+        return max(60, int(raw))
+    except ValueError:
+        return DEFAULT_TICKET_TTL_SECONDS
+
+
+def save_triage(
+    record: Dict[str, Any],
+    table: Optional[Any] = None,
+    clock: Callable[[], float] = time.time,
+) -> bool:
+    """Persist one tenant-scoped triage record with TTL retention."""
 
     try:
-        _table(table).put_item(Item=_to_ddb(record))
+        item = dict(record)
+        if "expires_at" not in item:
+            item["expires_at"] = int(clock()) + _ticket_ttl_seconds()
+        _table(table).put_item(Item=_to_ddb(item))
         return True
     except (ClientError, BotoCoreError, ValueError, TypeError) as exc:
         LOGGER.warning(
             "tickets_write_failed ticket_id=%s error=%s",
-            record.get("ticket_id"),
+            sanitize_log_value(record.get("ticket_id")),
             type(exc).__name__,
         )
         return False
@@ -82,14 +102,37 @@ def _percentile(values: List[float], percentile: float) -> float:
     return ordered[max(0, min(len(ordered) - 1, index))]
 
 
-def _scan_items(table: Any) -> List[Dict[str, Any]]:
+def _scan_items(table: Any, tenant_id: Optional[str] = None) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
+    index_name = os.environ.get("TICKETS_TENANT_INDEX", "").strip()
+    if tenant_id and index_name and hasattr(table, "query"):
+        query_kwargs: Dict[str, Any] = {
+            "IndexName": index_name,
+            "KeyConditionExpression": Key("tenant_id").eq(tenant_id),
+            "ProjectionExpression": "ticket_id, tenant_id, severity, category, telemetry, created_at",
+        }
+        for _ in range(MAX_SCAN_PAGES):
+            response = table.query(**query_kwargs)
+            for item in response.get("Items", []) or []:
+                if item.get("tenant_id") == tenant_id:
+                    items.append(item)
+            last_key = response.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            query_kwargs["ExclusiveStartKey"] = last_key
+        return items
+
     kwargs: Dict[str, Any] = {
-        "ProjectionExpression": "ticket_id, severity, category, telemetry, created_at"
+        "ProjectionExpression": "ticket_id, tenant_id, severity, category, telemetry, created_at"
     }
+    if tenant_id:
+        kwargs["FilterExpression"] = Attr("tenant_id").eq(tenant_id)
     for _ in range(MAX_SCAN_PAGES):
         response = table.scan(**kwargs)
-        items.extend(response.get("Items", []) or [])
+        for item in response.get("Items", []) or []:
+            if tenant_id and item.get("tenant_id") != tenant_id:
+                continue
+            items.append(item)
         last_key = response.get("LastEvaluatedKey")
         if not last_key:
             break
@@ -145,12 +188,20 @@ def _aggregate(items: Iterable[Dict[str, Any]], stack_version: str) -> Dict[str,
     }
 
 
-def get_stats(table: Optional[Any] = None) -> Dict[str, Any]:
-    """Return an aggregate view of every stored triage for ``GET /stats``."""
+def get_stats(
+    tenant_id: Optional[str] = None, table: Optional[Any] = None
+) -> Dict[str, Any]:
+    """Return a tenant-isolated aggregate view of stored triages for ``GET /stats``."""
 
+    if not isinstance(tenant_id, str) or not tenant_id.strip():
+        raise StorageError("tenant scope is required for statistics")
+
+    scoped_tenant = tenant_id.strip()
     try:
-        items = _scan_items(_table(table))
+        items = _scan_items(_table(table), tenant_id=scoped_tenant)
     except (ClientError, BotoCoreError) as exc:
         raise StorageError("ticket statistics are temporarily unavailable") from exc
 
-    return _aggregate(items, os.environ.get("STACK_VERSION", "unknown"))
+    stats = _aggregate(items, os.environ.get("STACK_VERSION", "unknown"))
+    stats["tenant_id"] = scoped_tenant
+    return stats
