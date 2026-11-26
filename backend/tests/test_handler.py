@@ -1,4 +1,4 @@
-"""Handler behaviour tests with a fake Bedrock client (zero AWS calls)."""
+﻿"""Handler behaviour tests with a fake Bedrock client (zero AWS calls)."""
 
 import json
 from types import SimpleNamespace
@@ -52,7 +52,7 @@ class FakeBedrock:
 def _invocation():
     return Invocation(
         text=MODEL_TEXT,
-        model_id="us.amazon.nova-pro-v1:0",
+        model_id="apac.amazon.nova-pro-v1:0",
         input_tokens=286,
         output_tokens=114,
         latency_ms=900,
@@ -80,7 +80,7 @@ def test_health_is_cheap_and_reports_stack_version(monkeypatch):
     assert response["statusCode"] == 200
     assert body["status"] == "ok"
     assert body["stack_version"] == "v1"
-    assert body["model_id"] == "us.amazon.nova-pro-v1:0"
+    assert body["model_id"] == "apac.amazon.nova-pro-v1:0"
 
 
 def test_unknown_route_returns_404():
@@ -138,7 +138,7 @@ def test_bedrock_failure_returns_502(monkeypatch, wired):
 
 
 def test_invalid_model_output_returns_502(monkeypatch):
-    fake = FakeBedrock(invocation=Invocation("not json", "us.amazon.nova-pro-v1:0", 1, 1, 10, 0.0, "end_turn"))
+    fake = FakeBedrock(invocation=Invocation("not json", "apac.amazon.nova-pro-v1:0", 1, 1, 10, 0.0, "end_turn"))
     monkeypatch.setattr(handler, "_BEDROCK_CLIENT", fake)
     monkeypatch.setattr(handler, "save_triage", lambda record: True)
     monkeypatch.setattr(handler, "emit_triage_metrics", lambda **kwargs: None)
@@ -185,8 +185,8 @@ def test_v2_delegates_to_adaptive_router(monkeypatch):
                     "draft_reply": "Here is the link you need.",
                 },
                 telemetry={
-                    "route_decision": "nova_micro",
-                    "model_id": "us.amazon.nova-micro-v1:0",
+                    "route_decision": "nova_lite",
+                    "model_id": "apac.amazon.nova-lite-v1:0",
                     "cache_hit": False,
                     "escalated": False,
                     "fallback_triggered": False,
@@ -206,7 +206,7 @@ def test_v2_delegates_to_adaptive_router(monkeypatch):
     telemetry = json.loads(response["body"])["telemetry"]
 
     assert response["statusCode"] == 200
-    assert telemetry["route_decision"] == "nova_micro"
+    assert telemetry["route_decision"] == "nova_lite"
     assert telemetry["frontier_tokens_used"] == 0
     assert telemetry["stack_version"] == "v2"
 

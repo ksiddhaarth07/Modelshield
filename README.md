@@ -8,7 +8,7 @@ delta can be measured live on the same 100-ticket benchmark.
 ModelShield is a worked example of a problem almost every production GenAI
 backend has: **every ticket goes to the most expensive model, forever.** The v1
 stack is that conventional baseline. The v2 stack adds a fail-open DynamoDB TTL
-cache and a confidence-gated Nova Micro → Nova Pro router, then proves the
+cache and a confidence-gated Nova Lite → Nova Pro router, then proves the
 result instead of asserting it.
 
 ## Before / After
@@ -16,11 +16,11 @@ result instead of asserting it.
 | Dimension | `v1-before` | `v2-after` |
 | --- | --- | --- |
 | Compute | Lambda `python3.13`, **x86_64**, **512 MB** | Lambda `python3.13`, **arm64**, **256 MB** |
-| Routing | 100% synchronous Nova Pro | TTL cache → complexity gate → Nova Micro → confidence/P1 escalation to Nova Pro |
+| Routing | 100% synchronous Nova Pro | TTL cache → complexity gate → Nova Lite → confidence/P1 escalation to Nova Pro |
 | Repeat traffic | Full frontier inference every time | Normalised SHA-256 key, DynamoDB **24h TTL**, `$0.00` model cost |
 | API protection | HTTP API + CORS | HTTP API + CORS + **25 req/s, burst 50** |
 | Data | `TicketsTable` | `TicketsTable` + `ResponseCacheTable` |
-| Failure mode | Provider error → 502 | Cache fail-open; Micro error → Pro fallback; Pro error → 502 |
+| Failure mode | Provider error → 502 | Cache fail-open; Lite error → Pro fallback; Pro error → 502 |
 | Observability | EMF + CloudWatch dashboard | Same, plus cache/escalation/fallback counters |
 | Package | Pure stdlib + runtime boto3 (no native wheels) | Same, which is what makes the Docker-free arm64 build possible |
 
@@ -45,7 +45,7 @@ Measured headline numbers are written to `eval/results/benchmark_report.json` by
               │                         │                         │
      ┌────────▼────────┐      ┌─────────▼─────────┐     ┌─────────▼─────────┐
      │ ResponseCache   │      │  Complexity gate  │     │  Amazon Bedrock   │
-     │ DynamoDB, 24h   │      │  keywords + size  │     │  Nova Micro / Pro │
+     │ DynamoDB, 24h   │      │  keywords + size  │     │  Nova Lite / Pro  │
      │ fail-open (v2)  │      └───────────────────┘     └───────────────────┘
      └─────────────────┘
               │
@@ -100,7 +100,7 @@ escalations and GB-seconds side by side.
 ```
 
 `severity` ∈ `P1..P4`; `category` ∈ `incident, security, billing, account, how_to, bug`;
-`route_decision` ∈ `single_heavy, cache_hit, nova_micro, escalated_pro, direct_pro, fallback_pro`.
+`route_decision` ∈ `single_heavy, cache_hit, nova_lite, escalated_pro, direct_pro, fallback_pro`.
 
 `GET /health` is a dependency-free liveness probe. `GET /stats` scans
 `TicketsTable` and returns severity/category rollups, p95 latency, spend and
@@ -109,7 +109,7 @@ cache/escalation counts.
 ## Deploy
 
 Prerequisites: AWS CLI v2 with credentials, SAM CLI, and Bedrock model access to
-`us.amazon.nova-pro-v1:0` (and `us.amazon.nova-micro-v1:0` for v2) in `us-east-1`.
+`apac.amazon.nova-pro-v1:0` (and `apac.amazon.nova-lite-v1:0` for v2) in `ap-southeast-2`.
 
 ```powershell
 # v1 (x86_64 / Nova Pro baseline)
@@ -140,7 +140,7 @@ critical tickets, including 11 ground-truth P1s.
 
 ```powershell
 python eval/run_benchmark.py --validate-only
-python eval/run_benchmark.py --v1-url $V1 --v2-url $V2 --concurrency 4
+python eval/run_benchmark.py --v1-url $V1 --v2-url $V2 --concurrency 2 --pacing 2.5
 ```
 
 The runner replays both stacks with at most four in-flight requests per stack and
@@ -148,6 +148,13 @@ reports accuracy, severity/category accuracy, P1 recall and precision, p95
 latency, exact spend, cost per successful ticket, GB-seconds, frontier tokens,
 cache/escalation/fallback counts, a v1↔v2 disagreement diff and regression list.
 A non-200 or off-contract response counts as a miss — it is never dropped.
+
+The five repeat groups collapse to five normalised cache keys, so a cold run
+produces 15 real cache hits out of 20 repeat tickets. The deterministic
+complexity gate is deliberately conservative: on this dataset it sends only the
+clearest multi-signal incident straight to Pro, and the confidence/P1 guardrail
+escalates the rest after the Lite pass. That is why the benchmark reports route
+distribution rather than just an aggregate.
 
 ## Live deck
 
@@ -177,7 +184,7 @@ cache (SUS03-BP01), fixed x86_64/512 MB (COST06-BP02), no request ceiling
 ```powershell
 cd backend
 python -m pip install -r requirements-dev.txt
-python -m pytest          # 34 tests, no AWS calls
+python -m pytest          # 65 tests, no AWS calls
 ```
 
 The Lambda handler is framework-free and covered with a fake Bedrock client, so
@@ -206,8 +213,8 @@ docs/                     Well-Architected before/after reports and diff
 
 - **Fail-open by default.** Cache read/write and ticket persistence degrade to a
   logged warning; only a failed model call produces a 5xx.
-- **Honest accounting.** An escalated request is billed as Micro + Pro tokens,
-  not as Micro. Cost per *successful* ticket is the headline metric, not cost per
+- **Honest accounting.** An escalated request is billed as Lite + Pro tokens,
+  not as Lite. Cost per *successful* ticket is the headline metric, not cost per
   request.
 - **Least privilege.** The role can `InvokeModel` on exactly one inference
   profile and its foundation-model ARN, and can touch exactly one table.
@@ -221,9 +228,10 @@ docs/                     Well-Architected before/after reports and diff
   committed ([docs/war-before.md](docs/war-before.md)).
 - The live deck typechecks and produces a production bundle
   (`frontend` → `npm run build`).
-- Live deployment is pending AWS account verification (Bedrock returns
-  `AccessDeniedException: Your account is currently being verified`) and an
-  Organizations SCP that denies DynamoDB/CloudFormation/Lambda on the current
-  deployment identity.
-- `v2-after` lands on the `feat/war-tiered-model-router` branch, after which the
-  same benchmark and the same review are re-run for the delta.
+- `v2-after` is implemented on `feat/war-tiered-model-router`: fail-open TTL
+  cache, confidence/P1-gated Nova Lite → Pro router, arm64/256 MB and API
+  throttling. 65 tests green; both `v1` and `v2` template profiles validate and
+  build.
+- Both stacks deployed to `ap-southeast-2` (`modelshield-v1` and `modelshield-v2`)
+  — run `eval/run_benchmark.py` with the printed API URLs to generate
+  `eval/results/benchmark_report.json`.

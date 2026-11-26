@@ -19,7 +19,7 @@ const SEVERITY_CLASS: Record<Severity, string> = {
 const ROUTE: Record<RouteDecision, { label: string; className: string }> = {
   single_heavy: { label: "NOVA PRO", className: "border-indigo-200 bg-indigo-50 text-indigo-700" },
   cache_hit: { label: "CACHE HIT", className: "border-emerald-200 bg-emerald-50 text-emerald-700" },
-  nova_micro: { label: "NOVA MICRO", className: "border-sky-200 bg-sky-50 text-sky-700" },
+  nova_lite: { label: "NOVA LITE", className: "border-sky-200 bg-sky-50 text-sky-700" },
   escalated_pro: { label: "ESCALATED → PRO", className: "border-amber-200 bg-amber-50 text-amber-700" },
   direct_pro: { label: "DIRECT PRO", className: "border-indigo-200 bg-indigo-50 text-indigo-700" },
   fallback_pro: { label: "FALLBACK → PRO", className: "border-rose-200 bg-rose-50 text-rose-700" },
@@ -101,7 +101,7 @@ export default function LiveTickerSplit({ v1, v2, running, progress, total }: Li
       <div className="flex items-center justify-between px-1">
         <p className="kicker">Live split replay</p>
         <p className="text-[10px] text-slate-500 tnum">
-          {running ? `${progress}/${total} in flight cap 4` : "concurrency capped at 4 per stack"}
+          {running ? `${progress}/${total} in flight cap 2` : "concurrency capped at 2 per stack"}
         </p>
       </div>
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 lg:grid-cols-2">
@@ -114,7 +114,7 @@ export default function LiveTickerSplit({ v1, v2, running, progress, total }: Li
         />
         <StreamColumn
           title="v2-after · adaptive router"
-          subtitle="cache → Micro → confidence/P1 escalation"
+          subtitle="cache → Nova Lite → targeted Pro escalation"
           results={v2}
           showRoute
           running={running}

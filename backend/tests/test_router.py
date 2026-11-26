@@ -1,11 +1,11 @@
-"""Router tests: cache hit, gate, Micro, escalation, fallback and fail-open."""
+"""Router tests: cache hit, gate, lite, escalation, fallback and fail-open."""
 
 import json
 
 import pytest
 
 from bedrock_client import (
-    NOVA_MICRO,
+    NOVA_LITE,
     NOVA_PRO,
     BedrockInvocationError,
     Invocation,
@@ -33,7 +33,7 @@ LONG_TICKET = {
 }
 
 
-def triage_json(severity="P3", category="how_to", confidence=0.9):
+def triage_json(severity="P4", category="how_to", confidence=0.9):
     return json.dumps(
         {
             "severity": severity,
@@ -91,10 +91,10 @@ class FakeCache:
         return True
 
 
-def make_router(micro, pro, cache=None):
+def make_router(lite, pro, cache=None):
     return AdaptiveRouter(
         pro_client=pro,
-        micro_client=micro,
+        lite_client=lite,
         cache=cache or FakeCache(),
         confidence_threshold=0.85,
     )
@@ -116,72 +116,72 @@ def test_cache_hit_returns_without_any_model_call():
 
 def test_invalid_cached_payload_is_treated_as_miss():
     key = build_cache_key(ROUTINE["subject"], ROUTINE["body"])
-    micro = FakeClient(invocation(triage_json(), NOVA_MICRO))
-    router = make_router(micro, FakeClient(), FakeCache({key: {"severity": "P9"}}))
+    lite = FakeClient(invocation(triage_json(), NOVA_LITE))
+    router = make_router(lite, FakeClient(), FakeCache({key: {"severity": "P9"}}))
 
     outcome = router.route(ROUTINE)
 
-    assert outcome.telemetry["route_decision"] == "nova_micro"
-    assert len(micro.calls) == 1
+    assert outcome.telemetry["route_decision"] == "nova_lite"
+    assert len(lite.calls) == 1
 
 
 def test_two_keywords_route_straight_to_pro():
     pro = FakeClient(invocation(triage_json("P1", "incident", 0.97), NOVA_PRO))
-    micro = FakeClient()
-    router = make_router(micro, pro)
+    lite = FakeClient()
+    router = make_router(lite, pro)
 
     outcome = router.route(COMPLEX)
 
     assert outcome.telemetry["route_decision"] == "direct_pro"
     assert outcome.telemetry["frontier_tokens_used"] == 150
-    assert micro.calls == []
+    assert lite.calls == []
     assert len(pro.calls) == 1
 
 
 def test_long_ticket_routes_straight_to_pro():
     pro = FakeClient(invocation(triage_json("P3", "bug", 0.9), NOVA_PRO))
-    micro = FakeClient()
-    router = make_router(micro, pro)
+    lite = FakeClient()
+    router = make_router(lite, pro)
 
     assert router.route(LONG_TICKET).telemetry["route_decision"] == "direct_pro"
-    assert micro.calls == []
+    assert lite.calls == []
 
 
-def test_routine_ticket_is_accepted_from_micro():
-    micro = FakeClient(invocation(triage_json("P4", "how_to", 0.93), NOVA_MICRO))
+def test_routine_ticket_is_accepted_from_lite():
+    lite = FakeClient(invocation(triage_json("P4", "how_to", 0.93), NOVA_LITE))
     pro = FakeClient()
-    router = make_router(micro, pro)
+    router = make_router(lite, pro)
 
     outcome = router.route(ROUTINE)
 
-    assert outcome.telemetry["route_decision"] == "nova_micro"
+    assert outcome.telemetry["route_decision"] == "nova_lite"
     assert outcome.telemetry["frontier_tokens_used"] == 0
     assert outcome.telemetry["estimated_cost_usd"] == pytest.approx(
-        calculate_cost(NOVA_MICRO, 100, 50)
+        calculate_cost(NOVA_LITE, 100, 50)
     )
     assert pro.calls == []
 
 
 def test_low_confidence_escalates_and_bills_both_calls():
-    micro = FakeClient(invocation(triage_json("P3", "how_to", 0.60), NOVA_MICRO))
+    lite = FakeClient(invocation(triage_json("P3", "how_to", 0.60), NOVA_LITE))
     pro = FakeClient(invocation(triage_json("P2", "bug", 0.95), NOVA_PRO))
-    router = make_router(micro, pro)
+    router = make_router(lite, pro)
 
     outcome = router.route(ROUTINE)
 
     assert outcome.telemetry["route_decision"] == "escalated_pro"
     assert outcome.telemetry["escalated"] is True
     assert outcome.telemetry["estimated_cost_usd"] == pytest.approx(
-        calculate_cost(NOVA_MICRO, 100, 50) + calculate_cost(NOVA_PRO, 100, 50)
+        calculate_cost(NOVA_LITE, 100, 50) + calculate_cost(NOVA_PRO, 100, 50)
     )
     assert outcome.telemetry["frontier_tokens_used"] == 150
     assert outcome.triage["severity"] == "P2"
 
 
 def test_p1_always_escalates_even_at_high_confidence():
-    micro = FakeClient(invocation(triage_json("P1", "incident", 0.99), NOVA_MICRO))
+    lite = FakeClient(invocation(triage_json("P1", "incident", 0.99), NOVA_LITE))
     pro = FakeClient(invocation(triage_json("P1", "incident", 0.98), NOVA_PRO))
-    router = make_router(micro, pro)
+    router = make_router(lite, pro)
 
     outcome = router.route(ROUTINE)
 
@@ -191,16 +191,16 @@ def test_p1_always_escalates_even_at_high_confidence():
 
 
 def test_confidence_at_threshold_does_not_escalate():
-    micro = FakeClient(invocation(triage_json("P3", "how_to", 0.85), NOVA_MICRO))
-    router = make_router(micro, FakeClient())
+    lite = FakeClient(invocation(triage_json("P4", "how_to", 0.85), NOVA_LITE))
+    router = make_router(lite, FakeClient())
 
-    assert router.route(ROUTINE).telemetry["route_decision"] == "nova_micro"
+    assert router.route(ROUTINE).telemetry["route_decision"] == "nova_lite"
 
 
-def test_micro_error_falls_back_to_pro():
-    micro = FakeClient(BedrockInvocationError("throttled"))
+def test_lite_error_falls_back_to_pro():
+    lite = FakeClient(BedrockInvocationError("throttled"))
     pro = FakeClient(invocation(triage_json("P3", "how_to", 0.9), NOVA_PRO))
-    router = make_router(micro, pro)
+    router = make_router(lite, pro)
 
     outcome = router.route(ROUTINE)
 
@@ -209,24 +209,24 @@ def test_micro_error_falls_back_to_pro():
     assert outcome.telemetry["estimated_cost_usd"] == pytest.approx(calculate_cost(NOVA_PRO, 100, 50))
 
 
-def test_invalid_micro_json_falls_back_and_keeps_micro_cost():
-    micro = FakeClient(invocation("not json", NOVA_MICRO))
+def test_invalid_lite_json_falls_back_and_keeps_lite_cost():
+    lite = FakeClient(invocation("not json", NOVA_LITE))
     pro = FakeClient(invocation(triage_json("P3", "how_to", 0.9), NOVA_PRO))
-    router = make_router(micro, pro)
+    router = make_router(lite, pro)
 
     outcome = router.route(ROUTINE)
 
     assert outcome.telemetry["route_decision"] == "fallback_pro"
     assert outcome.telemetry["estimated_cost_usd"] == pytest.approx(
-        calculate_cost(NOVA_MICRO, 100, 50) + calculate_cost(NOVA_PRO, 100, 50)
+        calculate_cost(NOVA_LITE, 100, 50) + calculate_cost(NOVA_PRO, 100, 50)
     )
     assert outcome.telemetry["frontier_tokens_used"] == 150
 
 
 def test_write_through_happens_for_every_route():
     cache = FakeCache()
-    micro = FakeClient(invocation(triage_json("P3", "how_to", 0.92), NOVA_MICRO))
-    router = make_router(micro, FakeClient(), cache)
+    lite = FakeClient(invocation(triage_json("P3", "billing", 0.92), NOVA_LITE))
+    router = make_router(lite, FakeClient(), cache)
 
     router.route(ROUTINE)
 
@@ -236,18 +236,18 @@ def test_write_through_happens_for_every_route():
 
 
 def test_cache_outage_never_blocks_triage():
-    micro = FakeClient(invocation(triage_json("P3", "how_to", 0.92), NOVA_MICRO))
-    router = make_router(micro, FakeClient(), FakeCache(fail=True))
+    lite = FakeClient(invocation(triage_json("P3", "billing", 0.92), NOVA_LITE))
+    router = make_router(lite, FakeClient(), FakeCache(fail=True))
 
     outcome = router.route(ROUTINE)
 
-    assert outcome.telemetry["route_decision"] == "nova_micro"
+    assert outcome.telemetry["route_decision"] == "nova_lite"
 
 
 def test_repeat_variants_share_one_cache_entry_end_to_end():
     cache = FakeCache()
-    micro = FakeClient(invocation(triage_json("P2", "incident", 0.9), NOVA_MICRO))
-    router = make_router(micro, FakeClient(), cache)
+    lite = FakeClient(invocation(triage_json("P3", "billing", 0.9), NOVA_LITE))
+    router = make_router(lite, FakeClient(), cache)
 
     first = dict(ROUTINE)
     second = {
@@ -259,9 +259,102 @@ def test_repeat_variants_share_one_cache_entry_end_to_end():
     first_outcome = router.route(first)
     second_outcome = router.route(second)
 
-    assert first_outcome.telemetry["route_decision"] == "nova_micro"
+    assert first_outcome.telemetry["route_decision"] == "nova_lite"
     assert second_outcome.telemetry["route_decision"] == "cache_hit"
-    assert len(micro.calls) == 1
+    assert len(lite.calls) == 1
+
+
+def test_p2_incident_stays_on_lite_when_confident():
+    lite = FakeClient(invocation(triage_json("P2", "incident", 0.95), NOVA_LITE))
+    pro = FakeClient()
+    router = make_router(lite, pro)
+
+    outcome = router.route(ROUTINE)
+
+    assert outcome.telemetry["route_decision"] == "nova_lite"
+    assert outcome.telemetry["frontier_tokens_used"] == 0
+    assert pro.calls == []
+
+
+def test_p3_how_to_escalates():
+    lite = FakeClient(invocation(triage_json("P3", "how_to", 0.95), NOVA_LITE))
+    pro = FakeClient(invocation(triage_json("P3", "how_to", 0.97), NOVA_PRO))
+    router = make_router(lite, pro)
+
+    assert router.route(ROUTINE).telemetry["route_decision"] == "escalated_pro"
+
+
+def test_p3_billing_stays_on_lite():
+    lite = FakeClient(invocation(triage_json("P3", "billing", 0.95), NOVA_LITE))
+    pro = FakeClient()
+    router = make_router(lite, pro)
+
+    outcome = router.route(ROUTINE)
+
+    assert outcome.telemetry["route_decision"] == "nova_lite"
+    assert pro.calls == []
+
+
+def test_p1_is_never_cached():
+    cache = FakeCache()
+    lite = FakeClient(invocation(triage_json("P1", "incident", 0.95), NOVA_LITE))
+    pro = FakeClient(invocation(triage_json("P1", "incident", 0.97), NOVA_PRO))
+    router = make_router(lite, pro, cache)
+
+    router.route(ROUTINE)
+
+    assert cache.puts == []
+
+
+def test_p1_cached_entry_is_bypassed_on_read():
+    stale_p1 = {
+        "severity": "P1",
+        "category": "incident",
+        "confidence": 0.99,
+        "summary": "Stale cached P1.",
+        "draft_reply": "Old reply.",
+    }
+    key = build_cache_key(ROUTINE["subject"], ROUTINE["body"])
+    cache = FakeCache({key: stale_p1})
+    lite = FakeClient(invocation(triage_json("P1", "incident", 0.96), NOVA_LITE))
+    pro = FakeClient(invocation(triage_json("P1", "incident", 0.98), NOVA_PRO))
+    router = make_router(lite, pro, cache)
+
+    outcome = router.route(ROUTINE)
+
+    assert outcome.telemetry["cache_hit"] is False
+    assert outcome.telemetry["route_decision"] == "escalated_pro"
+    assert len(lite.calls) == 1
+    assert len(pro.calls) == 1
+    assert cache.puts == []
+
+
+def test_timeout_and_retry_budget_stays_under_20_seconds():
+    from bedrock_client import _BOTO_CONFIG, BedrockClient
+    from router import _LITE_CONFIG, _LITE_MAX_ATTEMPTS, _PRO_CONFIG, _PRO_MAX_ATTEMPTS
+
+    default_client = BedrockClient(runtime_client=object())
+    default_budget = (
+        (_BOTO_CONFIG.connect_timeout + _BOTO_CONFIG.read_timeout) * default_client.max_attempts
+        + max(0, default_client.max_attempts - 1) * 0.5
+    )
+    lite_budget = (_LITE_CONFIG.connect_timeout + _LITE_CONFIG.read_timeout) * _LITE_MAX_ATTEMPTS
+    pro_budget = (_PRO_CONFIG.connect_timeout + _PRO_CONFIG.read_timeout) * _PRO_MAX_ATTEMPTS
+
+    assert default_budget < 20.0
+    assert lite_budget < 20.0
+    assert lite_budget + pro_budget < 20.0
+
+
+def test_build_router_respects_env_model_ids(monkeypatch):
+    from router import build_router
+
+    monkeypatch.setenv("HEAVY_MODEL_ID", "custom.pro-v1:0")
+    monkeypatch.setenv("LIGHT_MODEL_ID", "custom.lite-v1:0")
+    router = build_router()
+
+    assert router._pro.model_id == "custom.pro-v1:0"
+    assert router._lite.model_id == "custom.lite-v1:0"
 
 
 def test_outcome_type_is_exposed_for_handler():

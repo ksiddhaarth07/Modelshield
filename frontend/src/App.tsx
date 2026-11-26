@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+﻿import { useEffect, useMemo, useRef, useState } from "react";
 import CustomTicketDrawer from "./components/CustomTicketDrawer";
 import HeaderBar from "./components/HeaderBar";
 import LiveTickerSplit from "./components/LiveTickerSplit";
@@ -102,7 +102,7 @@ export default function App() {
         replayStack({
           baseUrl: V1_BASE,
           tickets: TICKETS,
-          concurrency: 4,
+          concurrency: 2,
           signal: controller.signal,
           onResult: (result) => setV1Results((previous) => [...previous, result]),
           onFailure: () => setFailures((previous) => ({ ...previous, v1: previous.v1 + 1 })),
@@ -110,7 +110,7 @@ export default function App() {
         replayStack({
           baseUrl: V2_BASE,
           tickets: TICKETS,
-          concurrency: 4,
+          concurrency: 2,
           signal: controller.signal,
           onResult: (result) => setV2Results((previous) => [...previous, result]),
           onFailure: () => setFailures((previous) => ({ ...previous, v2: previous.v2 + 1 })),

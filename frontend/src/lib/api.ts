@@ -77,8 +77,26 @@ interface ReplayOptions {
   tickets: Ticket[];
   concurrency: number;
   signal?: AbortSignal;
+  pacingMs?: number;
   onResult?: (result: TriageResult, completed: number) => void;
   onFailure?: (ticket: Ticket, error: unknown, completed: number) => void;
+}
+
+/** Spaces request starts so the Bedrock per-minute quota is never hit. */
+class Pacer {
+  private next = 0;
+
+  constructor(private readonly intervalMs: number) {}
+
+  async wait(): Promise<void> {
+    if (this.intervalMs <= 0) return;
+    const now = Date.now();
+    const delay = Math.max(0, this.next - now);
+    this.next = Math.max(now, this.next) + this.intervalMs;
+    if (delay > 0) {
+      await new Promise((resolve) => window.setTimeout(resolve, delay));
+    }
+  }
 }
 
 /**
@@ -90,11 +108,15 @@ export async function replayStack({
   tickets,
   concurrency,
   signal,
+  pacingMs = 2000,
   onResult,
   onFailure,
 }: ReplayOptions): Promise<ReplayOutcome> {
+  const safeConcurrency = Math.max(1, Math.min(2, concurrency));
+  const safePacingMs = Math.max(1500, pacingMs);
   const queue = [...tickets];
   const results: TriageResult[] = [];
+  const pacer = new Pacer(safePacingMs);
   let failures = 0;
   let completed = 0;
 
@@ -104,6 +126,7 @@ export async function replayStack({
       const ticket = queue.shift();
       if (!ticket) return;
       try {
+        await pacer.wait();
         const result = await requestTriage(baseUrl, ticket, signal);
         results.push(result);
         completed += 1;
@@ -117,7 +140,7 @@ export async function replayStack({
   };
 
   const workers = Array.from(
-    { length: Math.max(1, Math.min(concurrency, tickets.length)) },
+    { length: Math.max(1, Math.min(safeConcurrency, tickets.length)) },
     () => worker(),
   );
   await Promise.all(workers);

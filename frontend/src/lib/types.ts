@@ -10,7 +10,7 @@ export type Category =
 export type RouteDecision =
   | "single_heavy"
   | "cache_hit"
-  | "nova_micro"
+  | "nova_lite"
   | "escalated_pro"
   | "direct_pro"
   | "fallback_pro";

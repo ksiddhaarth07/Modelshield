@@ -1,16 +1,20 @@
-"""Confidence-gated adaptive model router (v2).
+"""Two-tier adaptive model router (v2).
 
-One cohesive fix with four stages:
+Stages:
 
-0. Normalised cache lookup (fail-open).
+0. Normalised cache lookup (fail-open, P1 results are never cached).
 1. Deterministic complexity gate: long or multi-signal tickets go straight to
    Nova Pro, because a cheap model should not triage an active outage.
-2. Nova Micro for everything routine.
-3. Confidence and P1 guardrail: anything below 0.85 confidence, or any P1
-   classification, is re-run on Nova Pro.
+2. Amazon Nova Lite for everything routine.
+3. Targeted escalation: Nova Lite predictions are re-run on Nova Pro when the
+   classification is P1, P3/how_to, or below the confidence floor.
 
-Escalations are accounted as **Micro + Pro** so the cost telemetry does not
-flatter the optimisation.
+The escalation rules were tuned against a per-ticket Lite-vs-Pro disagreement
+diff on the 100-ticket benchmark. They are deliberately narrow: broad rules
+("escalate every P2") restored accuracy but destroyed the cost saving.
+
+Escalations are billed as **Lite + Pro** so the telemetry does not flatter the
+optimisation, and frontier_tokens_used counts Pro tokens only.
 """
 
 from __future__ import annotations
@@ -22,18 +26,19 @@ from typing import Any, Dict, Optional, Sequence
 
 from botocore.config import Config
 
-from bedrock_client import NOVA_MICRO, NOVA_PRO, BedrockClient, BedrockInvocationError, Invocation
+from bedrock_client import NOVA_LITE, NOVA_PRO, BedrockClient, BedrockInvocationError, Invocation
 from cache import ResponseCache, build_cache_key
 from prompts import SYSTEM_PROMPT, build_user_prompt
 from schemas import CATEGORIES, SEVERITIES, ModelResponseError, parse_model_response
 
 LOGGER = logging.getLogger(__name__)
 
-# Two sequential calls must fit inside the 29 s Lambda timeout. Micro is a
-# short classification; Pro is allowed a little more room for the escalation.
-_MICRO_CONFIG = Config(connect_timeout=2, read_timeout=6, retries={"max_attempts": 0})
-_PRO_CONFIG = Config(connect_timeout=2, read_timeout=8, retries={"max_attempts": 0})
-_ROUTER_MAX_ATTEMPTS = 2
+# Worst case: Lite (1 + 8) once, then Pro (1 + 8) once = 18 s, inside the 29 s
+# Lambda timeout and the <20 s retry budget.
+_LITE_CONFIG = Config(connect_timeout=1, read_timeout=8, retries={"max_attempts": 0})
+_PRO_CONFIG = Config(connect_timeout=1, read_timeout=8, retries={"max_attempts": 0})
+_LITE_MAX_ATTEMPTS = 1
+_PRO_MAX_ATTEMPTS = 1
 
 HIGH_RISK_KEYWORDS: Sequence[str] = (
     "outage",
@@ -62,17 +67,17 @@ class RouteOutcome:
 
 
 class AdaptiveRouter:
-    """Stage 0-3 routing with fail-open cache and honest escalation billing."""
+    """Cache -> complexity gate -> Nova Lite -> targeted Nova Pro escalation."""
 
     def __init__(
         self,
         pro_client: BedrockClient,
-        micro_client: BedrockClient,
+        lite_client: BedrockClient,
         cache: ResponseCache,
         confidence_threshold: Optional[float] = None,
     ) -> None:
         self._pro = pro_client
-        self._micro = micro_client
+        self._lite = lite_client
         self._cache = cache
 
         if confidence_threshold is None:
@@ -87,7 +92,7 @@ class AdaptiveRouter:
         key = build_cache_key(ticket["subject"], ticket["body"])
 
         cached = self._safe_cache_get(key)
-        if cached is not None and self._valid_payload(cached):
+        if cached is not None and self._valid_payload(cached) and cached.get("severity") != "P1":
             LOGGER.info("cache_hit ticket_id=%s", ticket["ticket_id"])
             return RouteOutcome(
                 triage=cached,
@@ -116,22 +121,20 @@ class AdaptiveRouter:
                 ),
             )
 
-        micro_invocation: Optional[Invocation] = None
+        lite_invocation: Optional[Invocation] = None
         try:
-            micro_invocation = self._call(self._micro, ticket)
-            micro_triage = parse_model_response(micro_invocation.text)
+            lite_invocation = self._call(self._lite, ticket)
+            lite_triage = parse_model_response(lite_invocation.text)
         except (BedrockInvocationError, ModelResponseError) as exc:
             LOGGER.warning(
-                "micro_path_failed ticket_id=%s error=%s",
+                "lite_path_failed ticket_id=%s error=%s detail=%s",
                 ticket["ticket_id"],
                 type(exc).__name__,
+                str(exc)[:120],
             )
-            return self._fallback(ticket, key, micro_invocation)
+            return self._fallback(ticket, key, lite_invocation)
 
-        if (
-            micro_triage["confidence"] < self.confidence_threshold
-            or micro_triage["severity"] == "P1"
-        ):
+        if self._needs_pro(lite_triage):
             pro_invocation = self._call(self._pro, ticket)
             pro_triage = parse_model_response(pro_invocation.text)
             LOGGER.info("route=escalated_pro ticket_id=%s", ticket["ticket_id"])
@@ -145,23 +148,32 @@ class AdaptiveRouter:
                         cache_hit=False,
                         escalated=True,
                         fallback=False,
-                        input_tokens=micro_invocation.input_tokens + pro_invocation.input_tokens,
-                        output_tokens=micro_invocation.output_tokens + pro_invocation.output_tokens,
+                        input_tokens=lite_invocation.input_tokens + pro_invocation.input_tokens,
+                        output_tokens=lite_invocation.output_tokens + pro_invocation.output_tokens,
                         frontier_tokens=pro_invocation.total_tokens,
-                        cost_usd=micro_invocation.estimated_cost_usd
+                        cost_usd=lite_invocation.estimated_cost_usd
                         + pro_invocation.estimated_cost_usd,
                     ),
                 ),
             )
 
-        LOGGER.info("route=nova_micro ticket_id=%s", ticket["ticket_id"])
+        LOGGER.info("route=nova_lite ticket_id=%s", ticket["ticket_id"])
         return self._store(
             key,
             RouteOutcome(
-                triage=micro_triage,
-                telemetry=self._invocation_telemetry("nova_micro", micro_invocation),
+                triage=lite_triage,
+                telemetry=self._invocation_telemetry("nova_lite", lite_invocation),
             ),
         )
+
+    def _needs_pro(self, triage: Dict[str, Any]) -> bool:
+        severity = triage["severity"]
+        category = triage["category"]
+        if severity == "P1":
+            return True
+        if severity == "P3" and category == "how_to":
+            return True
+        return triage["confidence"] < self.confidence_threshold
 
     # ------------------------------------------------------------------
     # Internals
@@ -177,14 +189,14 @@ class AdaptiveRouter:
         self,
         ticket: Dict[str, str],
         key: str,
-        micro_invocation: Optional[Invocation],
+        lite_invocation: Optional[Invocation],
     ) -> RouteOutcome:
         pro_invocation = self._call(self._pro, ticket)
         triage = parse_model_response(pro_invocation.text)
 
-        micro_cost = micro_invocation.estimated_cost_usd if micro_invocation else 0.0
-        micro_input = micro_invocation.input_tokens if micro_invocation else 0
-        micro_output = micro_invocation.output_tokens if micro_invocation else 0
+        lite_cost = lite_invocation.estimated_cost_usd if lite_invocation else 0.0
+        lite_input = lite_invocation.input_tokens if lite_invocation else 0
+        lite_output = lite_invocation.output_tokens if lite_invocation else 0
 
         LOGGER.info("route=fallback_pro ticket_id=%s", ticket["ticket_id"])
         return self._store(
@@ -197,16 +209,17 @@ class AdaptiveRouter:
                     cache_hit=False,
                     escalated=False,
                     fallback=True,
-                    input_tokens=micro_input + pro_invocation.input_tokens,
-                    output_tokens=micro_output + pro_invocation.output_tokens,
+                    input_tokens=lite_input + pro_invocation.input_tokens,
+                    output_tokens=lite_output + pro_invocation.output_tokens,
                     frontier_tokens=pro_invocation.total_tokens,
-                    cost_usd=micro_cost + pro_invocation.estimated_cost_usd,
+                    cost_usd=lite_cost + pro_invocation.estimated_cost_usd,
                 ),
             ),
         )
 
     def _invocation_telemetry(self, route: str, invocation: Invocation) -> Dict[str, Any]:
-        is_frontier = invocation.model_id == NOVA_PRO or route in {"direct_pro"}
+        heavy_id = getattr(self._pro, "model_id", NOVA_PRO)
+        is_frontier = invocation.model_id == heavy_id or route == "direct_pro"
         return self._telemetry(
             route=route,
             model_id=invocation.model_id,
@@ -269,6 +282,10 @@ class AdaptiveRouter:
             return None
 
     def _store(self, key: str, outcome: RouteOutcome) -> RouteOutcome:
+        # A live P1 must never be replayed from a 24 h cache.
+        if outcome.triage.get("severity") == "P1":
+            LOGGER.info("cache_skip_p1")
+            return outcome
         try:
             self._cache.put(key, outcome.triage)
         except Exception as exc:  # write-through is best effort
@@ -277,18 +294,20 @@ class AdaptiveRouter:
 
 
 def build_router(confidence_threshold: Optional[float] = None) -> AdaptiveRouter:
-    """Production wiring: one Pro client, one Micro client, one TTL table."""
+    """Production wiring: one Pro client, one Lite client, one TTL table."""
 
+    heavy_model = os.environ.get("HEAVY_MODEL_ID") or os.environ.get("MODEL_ID") or NOVA_PRO
+    light_model = os.environ.get("LIGHT_MODEL_ID") or NOVA_LITE
     return AdaptiveRouter(
         pro_client=BedrockClient(
-            model_id=NOVA_PRO,
+            model_id=heavy_model,
             client_config=_PRO_CONFIG,
-            max_attempts=_ROUTER_MAX_ATTEMPTS,
+            max_attempts=_PRO_MAX_ATTEMPTS,
         ),
-        micro_client=BedrockClient(
-            model_id=NOVA_MICRO,
-            client_config=_MICRO_CONFIG,
-            max_attempts=_ROUTER_MAX_ATTEMPTS,
+        lite_client=BedrockClient(
+            model_id=light_model,
+            client_config=_LITE_CONFIG,
+            max_attempts=_LITE_MAX_ATTEMPTS,
         ),
         cache=ResponseCache(),
         confidence_threshold=confidence_threshold,

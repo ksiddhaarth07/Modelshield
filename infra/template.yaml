@@ -3,7 +3,7 @@ Transform: AWS::Serverless-2016-10-31
 Description: >-
   ModelShield. Serverless AI incident-triage gateway with two profiles:
   v1-before (x86_64 / 512 MB / 100% Nova Pro) and v2-after (arm64 / 256 MB /
-  fail-open TTL cache + confidence-gated Nova Micro -> Pro router). One
+  fail-open TTL cache + confidence-gated Nova Lite -> Pro router). One
   template, one API contract, measured side by side.
 
 Parameters:
@@ -15,13 +15,19 @@ Parameters:
       - v2
     Description: Logical stack version, emitted in telemetry and EMF dimensions.
 
-  ModelId:
+  HeavyModelId:
     Type: String
-    Default: us.amazon.nova-pro-v1:0
+    Default: apac.amazon.nova-pro-v1:0
     AllowedValues:
-      - us.amazon.nova-pro-v1:0
-      - us.amazon.nova-micro-v1:0
-    Description: Bedrock cross-region inference profile used for triage.
+      - apac.amazon.nova-pro-v1:0
+    Description: Bedrock cross-region inference profile for the heavy tier.
+
+  LightModelId:
+    Type: String
+    Default: apac.amazon.nova-lite-v1:0
+    AllowedValues:
+      - apac.amazon.nova-lite-v1:0
+    Description: Bedrock cross-region inference profile for the light tier (v2).
 
   LogRetentionDays:
     Type: Number
@@ -123,7 +129,9 @@ Resources:
       Environment:
         Variables:
           STACK_VERSION: !Ref StackVersion
-          MODEL_ID: !Ref ModelId
+          MODEL_ID: !Ref HeavyModelId
+          HEAVY_MODEL_ID: !Ref HeavyModelId
+          LIGHT_MODEL_ID: !Ref LightModelId
           TICKETS_TABLE: !Ref TicketsTable
           RESPONSE_CACHE_TABLE: !If
             - IsV2
@@ -160,15 +168,15 @@ Resources:
               Action:
                 - bedrock:InvokeModel
               Resource:
-                - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/us.amazon.nova-pro-v1:0"
+                - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${HeavyModelId}"
                 - !If
                   - IsV2
-                  - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/us.amazon.nova-micro-v1:0"
+                  - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${LightModelId}"
                   - !Ref AWS::NoValue
-                - "arn:aws:bedrock:us-*::foundation-model/amazon.nova-pro-v1:0"
+                - "arn:aws:bedrock:ap-*::foundation-model/amazon.nova-pro-v1:0"
                 - !If
                   - IsV2
-                  - "arn:aws:bedrock:us-*::foundation-model/amazon.nova-micro-v1:0"
+                  - "arn:aws:bedrock:ap-*::foundation-model/amazon.nova-lite-v1:0"
                   - !Ref AWS::NoValue
       Events:
         TriagePost:

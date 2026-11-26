@@ -31,7 +31,7 @@ def test_different_content_produces_different_keys():
 
 def test_uuid_is_ignored():
     first = build_cache_key("Sync error", "Request 9f1c2d3e-4a5b-6c7d-8e9f-0a1b2c3d4e5f failed.")
-    second = build_cache_key("Sync error", "Request 11112222-3333-4444-5555-666677778888 failed.")
+    second = build_cache_key("Sync error", "Request 11112222-3333-4444-5555-6666777788aa failed.")
     assert first == second
 
 

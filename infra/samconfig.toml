@@ -1,18 +1,20 @@
 version = 0.1
 
 # ---------------------------------------------------------------------------
-# Shared build settings. The backend is pure stdlib + runtime boto3, so the
-# arm64 build needs no Docker and no native wheels.
+# Home region is ap-southeast-2: the account's Organizations SCP allows
+# CloudFormation/DynamoDB/Lambda only there. Both stacks deploy into Sydney.
+# The backend is pure stdlib + runtime boto3, so the arm64 build needs no
+# Docker and no native wheels.
 # ---------------------------------------------------------------------------
 [default.global.parameters]
-region = "us-east-1"
+region = "ap-southeast-2"
 
 [default.build.parameters]
 cached = true
 parallel = true
 
 [default.deploy.parameters]
-region = "us-east-1"
+region = "ap-southeast-2"
 capabilities = "CAPABILITY_IAM"
 confirm_changeset = false
 resolve_s3 = true
@@ -22,29 +24,29 @@ s3_prefix = "modelshield"
 # v1-before: baseline stack. x86_64 / 512 MB / 100% Nova Pro.
 # ---------------------------------------------------------------------------
 [v1.global.parameters]
-region = "us-east-1"
+region = "ap-southeast-2"
 
 [v1.deploy.parameters]
 stack_name = "modelshield-v1"
-region = "us-east-1"
+region = "ap-southeast-2"
 capabilities = "CAPABILITY_IAM"
 confirm_changeset = false
 resolve_s3 = true
 s3_prefix = "modelshield-v1"
-parameter_overrides = "StackVersion=v1 ModelId=us.amazon.nova-pro-v1:0 LogRetentionDays=14"
+parameter_overrides = "StackVersion=v1 HeavyModelId=apac.amazon.nova-pro-v1:0 LightModelId=apac.amazon.nova-lite-v1:0 LogRetentionDays=14"
 
 # ---------------------------------------------------------------------------
 # v2-after: same template, different architecture profile. Kept side by side
 # with v1 so the benchmark can hit both APIs at the same time.
 # ---------------------------------------------------------------------------
 [v2.global.parameters]
-region = "us-east-1"
+region = "ap-southeast-2"
 
 [v2.deploy.parameters]
 stack_name = "modelshield-v2"
-region = "us-east-1"
+region = "ap-southeast-2"
 capabilities = "CAPABILITY_IAM"
 confirm_changeset = false
 resolve_s3 = true
 s3_prefix = "modelshield-v2"
-parameter_overrides = "StackVersion=v2 ModelId=us.amazon.nova-pro-v1:0 LogRetentionDays=14"
+parameter_overrides = "StackVersion=v2 HeavyModelId=apac.amazon.nova-pro-v1:0 LightModelId=apac.amazon.nova-lite-v1:0 LogRetentionDays=14"

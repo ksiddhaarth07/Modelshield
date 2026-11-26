@@ -1,3 +1,4 @@
+
 """Amazon Bedrock Converse wrapper with jittered retries and exact USD cost.
 
 Only the standard library and the ``boto3`` that ships with the Lambda
@@ -8,6 +9,7 @@ Only the standard library and the ``boto3`` that ships with the Lambda
 from __future__ import annotations
 
 import logging
+import os
 import random
 import time
 from dataclasses import dataclass
@@ -19,13 +21,13 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 LOGGER = logging.getLogger(__name__)
 
-NOVA_PRO = "us.amazon.nova-pro-v1:0"
-NOVA_MICRO = "us.amazon.nova-micro-v1:0"
+NOVA_PRO = "apac.amazon.nova-pro-v1:0"
+NOVA_LITE = "apac.amazon.nova-lite-v1:0"
 
-# us-east-1 on-demand token pricing, USD per single token.
+# ap-southeast-2 on-demand token pricing, USD per single token.
 PRICING: Dict[str, Dict[str, float]] = {
     NOVA_PRO: {"input": 0.80 / 1_000_000, "output": 3.20 / 1_000_000},
-    NOVA_MICRO: {"input": 0.035 / 1_000_000, "output": 0.14 / 1_000_000},
+    NOVA_LITE: {"input": 0.06 / 1_000_000, "output": 0.24 / 1_000_000},
 }
 
 RETRYABLE_ERROR_CODES = frozenset(
@@ -41,11 +43,11 @@ RETRYABLE_ERROR_CODES = frozenset(
     }
 )
 
-# SDK-level retries are disabled so the 3x jittered retry policy here is the
+# SDK-level retries are disabled so the bounded jittered retry policy here is the
 # single source of truth for both timing and telemetry.
 _BOTO_CONFIG = Config(
-    connect_timeout=3,
-    read_timeout=20,
+    connect_timeout=1,
+    read_timeout=8,
     retries={"max_attempts": 0, "mode": "standard"},
 )
 
@@ -94,7 +96,7 @@ class BedrockClient:
         self,
         model_id: str = NOVA_PRO,
         runtime_client: Optional[Any] = None,
-        max_attempts: int = 3,
+        max_attempts: int = 2,
         base_backoff_seconds: float = 0.25,
         sleep: Any = time.sleep,
         client_config: Optional[Config] = None,
@@ -103,9 +105,11 @@ class BedrockClient:
         self.max_attempts = max(1, max_attempts)
         self.base_backoff_seconds = base_backoff_seconds
         self._sleep = sleep
-        self._client = runtime_client or boto3.client(
-            "bedrock-runtime", config=client_config or _BOTO_CONFIG
-        )
+        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+        client_kwargs: Dict[str, Any] = {"config": client_config or _BOTO_CONFIG}
+        if region:
+            client_kwargs["region_name"] = region
+        self._client = runtime_client or boto3.client("bedrock-runtime", **client_kwargs)
 
     def _invoke(self, request: Dict[str, Any]) -> Dict[str, Any]:
         return self._client.converse(**request)
@@ -167,7 +171,7 @@ class BedrockClient:
                 )
 
             delay = min(
-                2.0,
+                0.5,
                 (self.base_backoff_seconds * (2 ** (attempt - 1)))
                 + random.uniform(0, self.base_backoff_seconds),
             )

@@ -120,13 +120,34 @@ async def _post_once(
     payload: Dict[str, str],
     semaphore: asyncio.Semaphore,
     timeout: float,
+    pacer: "Pacer",
 ) -> Tuple[Optional[httpx.Response], Optional[str]]:
     async with semaphore:
+        await pacer.wait()
         try:
             response = await client.post(url, json=payload, timeout=timeout)
             return response, None
         except httpx.HTTPError as exc:
             return None, f"{type(exc).__name__}: {exc}"
+
+
+class Pacer:
+    """Spaces request starts to stay under the Bedrock per-minute quota."""
+
+    def __init__(self, min_interval: float) -> None:
+        self._interval = max(0.0, min_interval)
+        self._lock = asyncio.Lock()
+        self._next = 0.0
+
+    async def wait(self) -> None:
+        if self._interval <= 0:
+            return
+        async with self._lock:
+            now = time.monotonic()
+            delay = max(0.0, self._next - now)
+            self._next = max(now, self._next) + self._interval
+        if delay > 0:
+            await asyncio.sleep(delay)
 
 
 def _empty_record(ticket: Dict[str, Any], status: Optional[int], error: str) -> Dict[str, Any]:
@@ -182,6 +203,7 @@ async def run_ticket(
     semaphore: asyncio.Semaphore,
     timeout: float,
     attempts: int,
+    pacer: Pacer,
 ) -> Dict[str, Any]:
     payload = {
         "ticket_id": ticket["ticket_id"],
@@ -193,7 +215,9 @@ async def run_ticket(
     last_status: Optional[int] = None
 
     for attempt in range(1, attempts + 1):
-        response, transport_error = await _post_once(client, endpoint, payload, semaphore, timeout)
+        response, transport_error = await _post_once(
+            client, endpoint, payload, semaphore, timeout, pacer
+        )
         if response is None:
             last_error = transport_error or "transport error"
             last_status = None
@@ -229,10 +253,12 @@ async def run_stack(
     concurrency: int,
     timeout: float,
     attempts: int,
+    pacing: float,
 ) -> Dict[str, Any]:
     base_url = base_url.rstrip("/")
     endpoint = f"{base_url}/triage"
     semaphore = asyncio.Semaphore(concurrency)
+    pacer = Pacer(pacing)
     limits = httpx.Limits(
         max_connections=concurrency, max_keepalive_connections=concurrency
     )
@@ -251,7 +277,7 @@ async def run_stack(
         started = time.perf_counter()
         tasks = [
             asyncio.ensure_future(
-                run_ticket(client, endpoint, ticket, semaphore, timeout, attempts)
+                run_ticket(client, endpoint, ticket, semaphore, timeout, attempts, pacer)
             )
             for ticket in tickets
         ]
@@ -481,6 +507,7 @@ async def amain(args: argparse.Namespace) -> int:
             concurrency=args.concurrency,
             timeout=args.timeout,
             attempts=args.attempts,
+            pacing=args.pacing,
         )
 
     report: Dict[str, Any] = {
@@ -492,6 +519,7 @@ async def amain(args: argparse.Namespace) -> int:
             **dist,
         },
         "concurrency": args.concurrency,
+        "pacing_seconds": args.pacing,
         "stacks": results,
     }
 
@@ -517,7 +545,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--v2-url", help="Base URL of the modelshield-v2 API")
     parser.add_argument("--dataset", default=str(DEFAULT_DATASET), help="Dataset JSON path")
     parser.add_argument("--out", default=str(DEFAULT_OUT), help="Report output path")
-    parser.add_argument("--concurrency", type=int, default=4, help="In-flight requests per stack (default 4)")
+    parser.add_argument("--concurrency", type=int, default=2, help="In-flight requests per stack (default 2)")
+    parser.add_argument("--pacing", type=float, default=2.0, help="Seconds between request starts (~30/min)")
     parser.add_argument("--timeout", type=float, default=60.0, help="Per-request timeout seconds")
     parser.add_argument("--attempts", type=int, default=2, help="Attempts per ticket on 5xx/transport errors")
     parser.add_argument("--limit", type=int, default=0, help="Only replay the first N tickets")
@@ -530,6 +559,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.concurrency < 1:
         print("error: --concurrency must be >= 1", file=sys.stderr)
         return 2
+    if args.concurrency > 2:
+        print(f"warning: clamping --concurrency from {args.concurrency} to 2 (Bedrock quota)", file=sys.stderr)
+        args.concurrency = 2
+    if args.pacing < 1.5:
+        print(f"warning: clamping --pacing from {args.pacing} to 1.5s (Bedrock quota)", file=sys.stderr)
+        args.pacing = 1.5
     try:
         return asyncio.run(amain(args))
     except KeyboardInterrupt:

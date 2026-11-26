@@ -133,7 +133,7 @@ export const TICKETS: Ticket[] = [
     ticket_id: "tkt-022",
     subject: "Okta SSO metadata mismatch after certificate renewal",
     body: "We renewed our IdP certificate and now logins fail with an invalid signature error. The metadata URL is unchanged but the certificate fingerprint differs.",
-    ground_truth: { severity: "P3", category: "account" },
+    ground_truth: { severity: "P2", category: "account" },
   },
   {
     ticket_id: "tkt-023",

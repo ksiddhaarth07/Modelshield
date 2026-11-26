@@ -22,7 +22,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
-from bedrock_client import BedrockClient, BedrockInvocationError
+from bedrock_client import NOVA_LITE, NOVA_PRO, BedrockClient, BedrockInvocationError
 from metrics import emit_triage_metrics
 from prompts import SYSTEM_PROMPT, build_user_prompt
 from router import AdaptiveRouter, RouteOutcome, build_router
@@ -129,10 +129,18 @@ def _memory_mb(context: Optional[Any]) -> int:
         return 512
 
 
+def _heavy_model_id() -> str:
+    return _env("HEAVY_MODEL_ID", _env("MODEL_ID", NOVA_PRO))
+
+
+def _light_model_id() -> str:
+    return _env("LIGHT_MODEL_ID", NOVA_LITE)
+
+
 def _bedrock_client() -> BedrockClient:
     global _BEDROCK_CLIENT
     if _BEDROCK_CLIENT is None:
-        _BEDROCK_CLIENT = BedrockClient(model_id=_env("MODEL_ID", "us.amazon.nova-pro-v1:0"))
+        _BEDROCK_CLIENT = BedrockClient(model_id=_heavy_model_id())
     return _BEDROCK_CLIENT
 
 
@@ -178,13 +186,18 @@ def _run_triage(ticket: Dict[str, str]) -> RouteOutcome:
 # Route handlers
 # ---------------------------------------------------------------------------
 def _health() -> Dict[str, Any]:
+    heavy = _heavy_model_id()
     return {
         "status": "ok",
         "service": "modelshield",
         "stack_version": _env("STACK_VERSION", "v1"),
-        "model_id": _env("MODEL_ID", "us.amazon.nova-pro-v1:0"),
+        # v1 invokes one model; v2 is a router, so model_id names the strategy
+        # and the two concrete models are reported separately.
+        "model_id": "adaptive-router" if _is_v2() else heavy,
+        "heavy_model_id": heavy,
+        "light_model_id": _light_model_id() if _is_v2() else heavy,
         "architecture": _env("ARCHITECTURE", "x86_64"),
-        "region": _env("AWS_REGION", _env("AWS_DEFAULT_REGION", "us-east-1")),
+        "region": _env("AWS_REGION", _env("AWS_DEFAULT_REGION", "ap-southeast-2")),
         "tickets_table": _env("TICKETS_TABLE", ""),
         "timestamp": _utc_now(),
     }
