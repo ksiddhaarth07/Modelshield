@@ -2,8 +2,22 @@ import type { Health, ReplayOutcome, Ticket, TriageResult } from "./types";
 
 const REQUEST_TIMEOUT_MS = 45_000;
 const TOKEN_STORAGE_KEY = "modelshield_session_jwt";
+const CLIENT_ID_STORAGE_KEY = "modelshield_cognito_client_id";
+const AWS_REGION_RE = /^[a-z]{2}(?:-[a-z]+)+-\d+$/;
 
 let inMemorySessionToken: string | null = null;
+
+export interface TokenMeta {
+  sub?: string;
+  email?: string;
+  tenantId?: string;
+  exp?: number;
+  expired: boolean;
+}
+
+export type CognitoSignInResult =
+  | { status: "authenticated"; idToken: string }
+  | { status: "new_password_required"; session: string };
 
 export function setSessionToken(token: string | null): void {
   const cleaned = token?.trim() ?? "";
@@ -27,6 +41,144 @@ export function getSessionToken(): string | null {
   } catch {
     return null;
   }
+}
+
+export function getSavedCognitoClientId(): string {
+  const envClientId = (import.meta.env.VITE_COGNITO_CLIENT_ID ?? "").trim();
+  try {
+    const stored = window.sessionStorage.getItem(CLIENT_ID_STORAGE_KEY);
+    if (stored && stored.trim().length > 0) return stored.trim();
+  } catch {
+    // Ignore storage read errors.
+  }
+  return envClientId;
+}
+
+export function setSavedCognitoClientId(clientId: string): void {
+  const cleaned = clientId.trim();
+  try {
+    if (cleaned) {
+      window.sessionStorage.setItem(CLIENT_ID_STORAGE_KEY, cleaned);
+    } else {
+      window.sessionStorage.removeItem(CLIENT_ID_STORAGE_KEY);
+    }
+  } catch {
+    // Ignore storage write errors.
+  }
+}
+
+export function parseTokenMeta(token: string | null): TokenMeta | null {
+  if (!token) return null;
+  const parts = token.split(".");
+  if (parts.length !== 3 || !parts[1]) return null;
+  try {
+    const normalized = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized.padEnd(normalized.length + ((4 - (normalized.length % 4)) % 4), "=");
+    const payload = JSON.parse(window.atob(padded)) as Record<string, unknown>;
+    const exp = typeof payload.exp === "number" ? payload.exp : undefined;
+    const expired = typeof exp === "number" ? exp * 1000 <= Date.now() : false;
+    const rawTenant = payload["custom:tenant_id"] ?? payload.tenant_id;
+    return {
+      sub: typeof payload.sub === "string" ? payload.sub : undefined,
+      email: typeof payload.email === "string" ? payload.email : undefined,
+      tenantId: typeof rawTenant === "string" ? rawTenant : undefined,
+      exp,
+      expired,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function resolveCognitoEndpoint(region: string): string {
+  const cleaned = region.trim().toLowerCase();
+  if (!AWS_REGION_RE.test(cleaned)) {
+    throw new ApiError("Invalid AWS Cognito region format.");
+  }
+  return `https://cognito-idp.${cleaned}.amazonaws.com/`;
+}
+
+async function callCognitoIdp(
+  region: string,
+  target: "InitiateAuth" | "RespondToAuthChallenge",
+  payload: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const endpoint = resolveCognitoEndpoint(region);
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-amz-json-1.1",
+      "X-Amz-Target": `AWSCognitoIdentityProviderService.${target}`,
+    },
+    body: JSON.stringify(payload),
+  });
+  const data = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+  if (!response.ok) {
+    const msg =
+      typeof data.message === "string"
+        ? data.message
+        : `Cognito returned HTTP ${response.status}`;
+    throw new ApiError(msg, response.status);
+  }
+  return data;
+}
+
+export async function signInWithCognito(params: {
+  email: string;
+  password: string;
+  clientId: string;
+  region?: string;
+}): Promise<CognitoSignInResult> {
+  const region = params.region ?? import.meta.env.VITE_COGNITO_REGION ?? "ap-southeast-2";
+  const clientId = params.clientId.trim();
+  if (!clientId) throw new ApiError("Cognito App Client ID is required.");
+  const data = await callCognitoIdp(region, "InitiateAuth", {
+    AuthFlow: "USER_PASSWORD_AUTH",
+    ClientId: clientId,
+    AuthParameters: {
+      USERNAME: params.email.trim(),
+      PASSWORD: params.password,
+    },
+  });
+  if (data.ChallengeName === "NEW_PASSWORD_REQUIRED" && typeof data.Session === "string") {
+    return { status: "new_password_required", session: data.Session };
+  }
+  const authResult = data.AuthenticationResult as Record<string, unknown> | undefined;
+  const idToken = typeof authResult?.IdToken === "string" ? authResult.IdToken : "";
+  if (!idToken) {
+    throw new ApiError("Cognito did not return an ID token.");
+  }
+  setSavedCognitoClientId(clientId);
+  setSessionToken(idToken);
+  return { status: "authenticated", idToken };
+}
+
+export async function completeCognitoNewPassword(params: {
+  email: string;
+  newPassword: string;
+  session: string;
+  clientId: string;
+  region?: string;
+}): Promise<string> {
+  const region = params.region ?? import.meta.env.VITE_COGNITO_REGION ?? "ap-southeast-2";
+  const clientId = params.clientId.trim();
+  const data = await callCognitoIdp(region, "RespondToAuthChallenge", {
+    ChallengeName: "NEW_PASSWORD_REQUIRED",
+    ClientId: clientId,
+    Session: params.session,
+    ChallengeResponses: {
+      USERNAME: params.email.trim(),
+      NEW_PASSWORD: params.newPassword,
+    },
+  });
+  const authResult = data.AuthenticationResult as Record<string, unknown> | undefined;
+  const idToken = typeof authResult?.IdToken === "string" ? authResult.IdToken : "";
+  if (!idToken) {
+    throw new ApiError("Cognito challenge did not return an ID token.");
+  }
+  setSavedCognitoClientId(clientId);
+  setSessionToken(idToken);
+  return idToken;
 }
 
 export class ApiError extends Error {

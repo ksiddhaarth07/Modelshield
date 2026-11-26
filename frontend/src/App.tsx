@@ -11,7 +11,7 @@ import SettingsPage from "./components/pages/SettingsPage";
 import WarAuditPage from "./components/pages/WarAuditPage";
 import { TICKETS } from "./data/tickets";
 import { INITIAL_V1_RESULTS, INITIAL_V2_RESULTS } from "./data/benchmark";
-import { fetchHealth, normalizeBaseUrl, replayStack, requestTriage } from "./lib/api";
+import { ApiError, fetchHealth, getSessionToken, normalizeBaseUrl, parseTokenMeta, replayStack, requestTriage } from "./lib/api";
 import { summarize } from "./lib/metrics";
 import type { HealthState, TriageResult } from "./lib/types";
 
@@ -35,8 +35,22 @@ export default function App() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [customLoading, setCustomLoading] = useState(false);
   const [customResults, setCustomResults] = useState<CustomResults>({ v1: null, v2: null });
+  const [authPrompt, setAuthPrompt] = useState<string | null>(null);
+  const [authenticated, setAuthenticated] = useState(() => {
+    const token = getSessionToken();
+    const meta = parseTokenMeta(token);
+    return Boolean(token && !meta?.expired);
+  });
   const [mouseOffset, setMouseOffset] = useState({ x: 0, y: 0 });
   const abortRef = useRef<AbortController | null>(null);
+
+  const refreshAuthState = () => {
+    const token = getSessionToken();
+    const meta = parseTokenMeta(token);
+    const ok = Boolean(token && !meta?.expired);
+    setAuthenticated(ok);
+    if (ok) setAuthPrompt(null);
+  };
 
   // Cmd+K / Ctrl+K listener
   useEffect(() => {
@@ -124,6 +138,13 @@ export default function App() {
 
   const runReplay = async () => {
     if (!V1_BASE || !V2_BASE || running) return;
+    const token = getSessionToken();
+    const meta = parseTokenMeta(token);
+    if (!token || meta?.expired) {
+      setAuthPrompt("Sign in with Cognito (or paste a Bearer JWT) before running live replay requests.");
+      setPage("settings");
+      return;
+    }
     const controller = new AbortController();
     abortRef.current = controller;
     setRunning(true);
@@ -167,6 +188,9 @@ export default function App() {
       try {
         return await requestTriage(baseUrl, ticket);
       } catch (err) {
+        if (err instanceof ApiError && err.status === 401) {
+          return "HTTP 401 Unauthorized — sign in with Cognito under Settings first.";
+        }
         return err instanceof Error ? err.message : "request failed";
       }
     };
@@ -228,8 +252,10 @@ export default function App() {
               progress={progress}
               total={TICKETS.length}
               canRun={canRun}
+              authenticated={authenticated}
               onRun={() => void runReplay()}
               onOpenCustom={() => setDrawerOpen(true)}
+              onOpenSettings={() => setPage("settings")}
               onOpenMenu={() => setMobileMenuOpen(true)}
             />
 
@@ -266,6 +292,8 @@ export default function App() {
                     <SettingsPage
                       v1Url={V1_BASE}
                       v2Url={V2_BASE}
+                      authPrompt={authPrompt}
+                      onAuthChange={refreshAuthState}
                       onOpenCustom={() => setDrawerOpen(true)}
                     />
                   )}

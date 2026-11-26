@@ -1,4 +1,4 @@
-import { Menu, Shield, Terminal } from "lucide-react";
+import { Lock, Menu, Shield, Terminal } from "lucide-react";
 
 const LOGS = [
   "🛡️ [Guardrail] P1 guardrail armed — auto-escalates to Nova Pro for 100% recall",
@@ -17,8 +17,10 @@ interface TopBarProps {
   progress: number;
   total: number;
   canRun: boolean;
+  authenticated: boolean;
   onRun: () => void;
   onOpenCustom: () => void;
+  onOpenSettings: () => void;
   onOpenMenu: () => void;
 }
 
@@ -28,8 +30,10 @@ export default function TopBar({
   progress,
   total,
   canRun,
+  authenticated,
   onRun,
   onOpenCustom,
+  onOpenSettings,
   onOpenMenu,
 }: TopBarProps) {
   const titles: Record<string, string> = {
@@ -73,6 +77,21 @@ export default function TopBar({
           <span className="pulse-dot h-1.5 w-1.5 rounded-full bg-emerald-400" />
           System Live
         </div>
+
+        {/* Auth session pill */}
+        <button
+          type="button"
+          onClick={onOpenSettings}
+          data-hover="1"
+          className={`hidden items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors sm:flex ${
+            authenticated
+              ? "border-cyan-400/35 bg-cyan-500/10 text-cyan-300 hover:bg-cyan-500/20"
+              : "border-amber-400/35 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20"
+          }`}
+        >
+          <Lock size={11} />
+          {authenticated ? "JWT Active" : "Sign In"}
+        </button>
 
         {/* Single primary action pair: Test Single Ticket + Replay 100 Tickets */}
         <button
