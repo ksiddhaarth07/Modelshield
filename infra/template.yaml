@@ -109,6 +109,8 @@ Resources:
           RequireUppercase: true
           RequireNumbers: true
           RequireSymbols: true
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true   # Only you (admin) can create accounts
       Schema:
         - Name: tenant_id
           AttributeDataType: String
