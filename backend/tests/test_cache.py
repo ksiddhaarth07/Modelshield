@@ -89,3 +89,26 @@ def test_missing_table_name_fails_open():
     cache._table_name = None
     assert cache.get("k") is None
     assert cache.put("k", {"severity": "P3"}) is False
+
+
+def test_put_converts_floats_to_decimal_for_dynamodb_and_restores_on_get():
+    from boto3.dynamodb.types import TypeSerializer
+
+    table = FakeTable()
+    cache = ResponseCache(table=table, clock=lambda: 1000, ttl_seconds=86400)
+    payload = {
+        "severity": "P3",
+        "category": "billing",
+        "confidence": 0.92,
+        "summary": "Invoice PDF.",
+        "draft_reply": "Sent.",
+    }
+    assert cache.put("k", payload) is True
+
+    serializer = TypeSerializer()
+    # Must serialize cleanly under strict boto3 DynamoDB rules (rejects Python float).
+    serializer.serialize(table.puts[0])
+
+    restored = cache.get("k")
+    assert restored == payload
+    assert isinstance(restored["confidence"], float)

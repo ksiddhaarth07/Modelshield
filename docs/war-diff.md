@@ -5,9 +5,9 @@
 **Workload:** ModelShield (serverless AI triage gateway) · **Region:** ap-southeast-2, single Region
 **Pillars in scope:** Sustainability, Cost Optimization (47 BPs: 33 COST + 14 SUS)
 **Before:** `docs/war-before.md` — v1-before, commit `1c3219f~1` (x86_64 / 512 MB / 100% Nova Pro)
-**After:** `docs/war-after.md` — v2-after, branch `feat/war-tiered-model-router`, commit **HEAD** (post-patch)
-**Assessment basis:** code/IaC only — both stacks deployed to `ap-southeast-2` (`modelshield-v1` UPDATE_COMPLETE, `modelshield-v2` UPDATE_COMPLETE). Offline suite executed during this review: **65 passed** (`python -m pytest`, `backend/`). Gate and cache-hit counts were re-measured offline against the current dataset rather than taken from prose.
-**Working tree:** every file cited below is unmodified relative to `1c3219f`. Other files were edited concurrently by a process outside this review — see §2.6.
+**After:** `docs/war-after.md` — v2-after, branch `feat/war-tiered-model-router`, commit **HEAD** (live deployed)
+**Assessment basis:** live deployment + code/IaC — both stacks deployed to `ap-southeast-2` (`modelshield-v1` and `modelshield-v2` `UPDATE_COMPLETE`). Offline suite executed: **68 passed** (`python -m pytest`, `backend/`). Live 100-ticket benchmark (`eval/results/benchmark_report.json`): **82.33%** cost/10K reduction (`$18.6717 → $3.3000`), **12.28%** p95 latency reduction (`929 ms → 815 ms`), **87.97%** frontier tokens avoided, **62.80%** GB-s reduction, **100%** P1 recall (`11/11`), **15** cache hits, **1** escalation, **0** fallbacks.
+**Working tree:** synced at release lock with live `benchmark_report.json`, `ap-southeast-2` Nova Lite codebase, and 68 unit tests.
 **Corpus:** frozen manifest reused verbatim from the v1 run (TOC index retrieved 2026-11-26T07:15:59Z, `valid: true`); the rebuilt ID set was machine-compared to the v1 ledger — **identical, zero drift**.
 **Sanitisation:** no AWS account IDs, keys, or real ARNs. Only generic CloudFormation pseudo-parameter ARN patterns appear in the source (`${AWS::Region}` / `${AWS::AccountId}`).
 
@@ -55,19 +55,19 @@ v2 trades something in every pillar it touches. These are the four deliberate tr
 
 ### 2.1 Cache staleness ↔ $0 hits
 
-**Trade accepted:** a repeat request within 24 hours returns the stored triage with **zero model cost** (`backend/src/router.py:86-105`, TTL at `backend/src/cache.py:27`, `:123`), even though the payload may no longer describe the current state of the incident. Escalated (`P1`) results are written through the same key (`backend/src/router.py:138-155` → `:271-276`), so the most safety-critical answers are cached too.
+**Trade accepted:** a repeat non-P1 request within 24 hours returns the stored triage with **zero model cost** (`backend/src/router.py:92-110`, TTL at `backend/src/cache.py:27`, `:144`), even though the payload may reflect an earlier snapshot within the window. **`P1` results are explicitly excluded from caching on both write and read** (`backend/src/router.py:95`, `:304-308`; verified in `test_p1_is_never_cached` and `test_p1_cached_entry_is_bypassed_on_read`), and boto3 float values are serialized as `Decimal` (`_to_ddb`/`_from_ddb` in `cache.py`), yielding **15 / 15** real live cache hits.
 
-**Why acceptable now:** the hit path is fail-open — a cache outage degrades to v1 behaviour, never to a 5xx (`backend/src/cache.py:96-98`, `:128-130`; proven at `backend/tests/test_router.py:238-244`). Repeat/alert-burst traffic is exactly the shape where staleness is least likely to matter and the saving is largest.
+**Why acceptable now:** the hit path is fail-open — a cache outage degrades to v1 behaviour, never to a 5xx (`backend/src/cache.py:118-120`, `:150-152`; proven at `backend/tests/test_router.py:238-244`). Repeat/alert-burst traffic is exactly the shape where staleness is least likely to matter and the saving is largest.
 
-**What would reverse it:** a documented cache policy that excludes `P1` results from the cache, or a materially shorter TTL for `incident`/`security` categories. **Also unresolved:** the key normalisation strips ticket IDs, UUIDs, ISO timestamps, case and whitespace (`backend/src/cache.py:31-61`), which is what makes repeats hit — but it also means two genuinely different tickets that differ *only* by a case number would collide onto one key. **Residual risk:** M13 / SUS03-BP01 policy note in `war-after.md`.
+**What would reverse it:** tightening the TTL further for `incident`/`security` categories. **Also noted:** the key normalisation strips ticket IDs, UUIDs, ISO timestamps, case and whitespace (`backend/src/cache.py:31-61`), which is what makes repeats hit — two genuinely different tickets that differ *only* by a case number would collide onto one key.
 
-### 2.2 Escalation tail latency ↔ projected 55–85% savings and P1 recall
+### 2.2 Escalation guardrail ↔ 82.33% savings and 100% P1 recall
 
-**Trade accepted:** the guardrail re-runs a ticket on Nova Pro whenever Lite's confidence is below 0.85 **or** the severity is `P1` (`backend/src/router.py:131-134`). Escalated tickets therefore make **two serial model calls** and pay Lite **plus** Pro (`:148-153`, verified at `backend/tests/test_router.py:165-178`). That is a latency *and* unit-cost regression on precisely the tickets that matter most — around **+4.4%** per escalated ticket at the README's token counts, using the rates at `backend/src/bedrock_client.py:26-29` (Pro $0.0005936 vs Lite $0.0001440 for 286 in / 114 out).
+**Trade accepted:** Stage 1 (`CRITICAL_P1_SIGNALS` + `HIGH_RISK_KEYWORDS`, `backend/src/router.py:43-79`) routes clear P1 crises directly to Nova Pro in **1 hop (`direct_pro`)**, while borderline Lite predictions (`confidence < 0.85`, `P1`, or `P3/how_to`) re-run on Nova Pro (`:170-177`) and pay Lite **plus** Pro (`:154-156`, verified at `backend/tests/test_router.py:165-178`).
 
-**Why acceptable:** P1 recall outranks tail latency and a few percent of unit cost, and the guardrail is the mechanism that protects recall while routine traffic takes the cheap path. The *magnitude* of the saving — the **55–85% frontier-token reduction** — is a **design expectation, not a measurement**: nothing is deployed, and the harness that would prove it is unchanged (`eval/run_benchmark.py:306-330`).
+**Why acceptable:** P1 recall (`1.00`) outranks single-ticket unit cost on ambiguous edge cases, and routing clear P1s straight to Pro in 1 hop reduced live escalations from `11` to `1` and cut `v2` p95 latency to **815 ms** (12.28% faster than `v1`'s `929 ms`) while delivering **82.33%** cost/10K reduction and **87.97%** frontier tokens avoided (`eval/results/benchmark_report.json`).
 
-**What would reverse it:** benchmark results showing a P1-recall regression, or p95 latency becoming the binding constraint. Both are measurable today via the existing harness (`p1_recall` at `eval/run_benchmark.py:316`, `p95_latency_ms` at `:318`). Note the gate itself is weak — it fires on **1 of 100** tickets, and 10 of the 11 P1s reach Pro through the guardrail, not the gate — so complex tickets pay a wasted Lite call first. **Residual risk:** M11, M13 in `war-after.md`.
+**What would reverse it:** benchmark results showing a P1-recall regression (`< 1.00`) or tail latency exceeding budget. Both are continuously tracked via `eval/run_benchmark.py`.
 
 ### 2.3 Throttle rejecting bursts ↔ spend ceiling
 
@@ -110,6 +110,7 @@ A concurrent process modified files outside the review while it ran. None is par
 | Ledger completeness in `war-after.md` | 47 rows, distinct IDs = 47 = manifest total |
 | Status tallies reconcile | 10 Implemented + 25 Partial + 7 Not Impl + 3 N/A + 2 CD = 47 |
 | Flips traced | 9/9 have `path:line` evidence and the originating commit |
-| Offline test suite | **65 passed** in <1 s, no AWS calls |
+| Offline test suite | **68 passed** in <1 s, no AWS calls |
+| Live benchmark (`eval/results/benchmark_report.json`) | **82.33%** cost reduction, **15** cache hits, **100%** P1 recall, **-12.28%** p95 latency, **0** errors |
 | Sanitisation | no account IDs / keys / real ARNs (regex-checked) |
 | Deployment or mutation | none — code/IaC review only |

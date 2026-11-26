@@ -24,8 +24,18 @@ result instead of asserting it.
 | Observability | EMF + CloudWatch dashboard | Same, plus cache/escalation/fallback counters |
 | Package | Pure stdlib + runtime boto3 (no native wheels) | Same, which is what makes the Docker-free arm64 build possible |
 
-Measured headline numbers are written to `eval/results/benchmark_report.json` by
-`eval/run_benchmark.py` and summarised here once the two stacks are live.
+Measured headline numbers from `eval/results/benchmark_report.json` (`ap-southeast-2`, 100 tickets, concurrency 2, pacing 2.5 s):
+
+| Metric | `v1-before` | `v2-after` | Delta |
+| --- | --- | --- | --- |
+| Accuracy | **94.0%** | **92.0%** | `-2.00 pp` |
+| P1 Recall | **100%** (`11/11`) | **100%** (`11/11`) | `0.00 pp` |
+| Cost / 10K Tickets | `$18.6717` | **`$3.3000`** | **`-82.33%`** |
+| Cost / Successful Ticket | `$0.001986` | **`$0.000359`** | **`-81.94%`** |
+| p95 Latency | `929 ms` | **`815 ms`** | **`-12.28%`** |
+| Frontier Tokens | `209,426` | **`25,202`** | **`-87.97%`** |
+| Lambda GB-Seconds | `36.7620` | **`13.6749`** | **`-62.80%`** |
+| Cache Hits / Escalations / Fallbacks | `0 / 0 / 0` | **`15 / 1 / 0`** | `+15 cache hits` |
 
 ## Architecture
 
@@ -83,7 +93,7 @@ escalations and GB-seconds side by side.
   "telemetry": {
     "stack_version": "v1",
     "route_decision": "single_heavy",
-    "model_id": "us.amazon.nova-pro-v1:0",
+    "model_id": "apac.amazon.nova-pro-v1:0",
     "cache_hit": false,
     "escalated": false,
     "fallback_triggered": false,
@@ -143,18 +153,17 @@ python eval/run_benchmark.py --validate-only
 python eval/run_benchmark.py --v1-url $V1 --v2-url $V2 --concurrency 2 --pacing 2.5
 ```
 
-The runner replays both stacks with at most four in-flight requests per stack and
+The runner replays both stacks with concurrency capped at 2 (and pacing ≥ 1.5 s) and
 reports accuracy, severity/category accuracy, P1 recall and precision, p95
 latency, exact spend, cost per successful ticket, GB-seconds, frontier tokens,
 cache/escalation/fallback counts, a v1↔v2 disagreement diff and regression list.
 A non-200 or off-contract response counts as a miss — it is never dropped.
 
 The five repeat groups collapse to five normalised cache keys, so a cold run
-produces 15 real cache hits out of 20 repeat tickets. The deterministic
-complexity gate is deliberately conservative: on this dataset it sends only the
-clearest multi-signal incident straight to Pro, and the confidence/P1 guardrail
-escalates the rest after the Lite pass. That is why the benchmark reports route
-distribution rather than just an aggregate.
+produces 15 real cache hits out of 20 repeat tickets. Stage 1's deterministic
+complexity gate routes unambiguous active P1s (`CRITICAL_P1_SIGNALS` / multi-signal
+outages) straight to Nova Pro in 1 hop (`direct_pro`), while routine tickets take
+Nova Lite and borderline predictions escalate via the confidence/P1 guardrail.
 
 ## Live deck
 
@@ -165,10 +174,12 @@ npm install
 npm run dev
 ```
 
-The deck is a single light-mode viewport: stack health, four KPI cards, the
-side-by-side replay ticker with route badges, the 10K→5M monthly ROI slider and
-the Well-Architected flip card. It talks to the same contract as the benchmark
-and caps each stack at four in-flight requests.
+The deck is a responsive dark obsidian glassmorphic viewport (`Dashboard`,
+`Live Replay`, `WAR Audit`, `Settings`): stack health, `V2 Route Distribution`,
+`v1-before` vs `v2-after` glass cards, `Live Telemetry` chart, `Efficiency & Recall`
+radial ring, the 10K→5M monthly ROI slider, `WAR Maturity` summary, and the
+Well-Architected 3D pipeline + delta trace. It talks to the same contract as the
+benchmark and caps each stack at 2 in-flight requests.
 
 ## Well-Architected review
 
@@ -184,7 +195,7 @@ cache (SUS03-BP01), fixed x86_64/512 MB (COST06-BP02), no request ceiling
 ```powershell
 cd backend
 python -m pip install -r requirements-dev.txt
-python -m pytest          # 65 tests, no AWS calls
+python -m pytest          # 68 tests, no AWS calls
 ```
 
 The Lambda handler is framework-free and covered with a fake Bedrock client, so
@@ -229,9 +240,11 @@ docs/                     Well-Architected before/after reports and diff
 - The live deck typechecks and produces a production bundle
   (`frontend` → `npm run build`).
 - `v2-after` is implemented on `feat/war-tiered-model-router`: fail-open TTL
-  cache, confidence/P1-gated Nova Lite → Pro router, arm64/256 MB and API
-  throttling. 65 tests green; both `v1` and `v2` template profiles validate and
-  build.
-- Both stacks deployed to `ap-southeast-2` (`modelshield-v1` and `modelshield-v2`)
-  — run `eval/run_benchmark.py` with the printed API URLs to generate
-  `eval/results/benchmark_report.json`.
+  cache (`Decimal` serialization), 1-hop `CRITICAL_P1_SIGNALS` gate + confidence/P1
+  guardrail on Nova Lite → Pro, arm64/256 MB, and API throttling. **68 tests**
+  green; both `v1` and `v2` template profiles validate and build.
+- Both stacks are deployed live in `ap-southeast-2` (`modelshield-v1` and
+  `modelshield-v2`), with `eval/results/benchmark_report.json` showing **82.33%**
+  cost/10K reduction, **12.28%** p95 latency reduction, **87.97%** frontier tokens
+  avoided, **100%** P1 recall, and **15** live DynamoDB cache hits (`0` errors,
+  `0` fallbacks).

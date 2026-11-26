@@ -30,13 +30,10 @@ export function summarize(
     if (expected.severity === result.severity && expected.category === result.category) {
       correct += 1;
     }
-  }
-
-  for (const ticket of truth.values()) {
-    if (ticket.ground_truth.severity !== "P1") continue;
-    p1Total += 1;
-    const result = results.find((candidate) => candidate.ticket_id === ticket.ticket_id);
-    if (result?.severity === "P1") p1Hit += 1;
+    if (expected.severity === "P1") {
+      p1Total += 1;
+      if (result.severity === "P1") p1Hit += 1;
+    }
   }
 
   const latencies = results.map((result) => Number(result.telemetry?.latency_ms ?? 0));

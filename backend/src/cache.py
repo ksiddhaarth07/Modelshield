@@ -18,6 +18,7 @@ import os
 import re
 import time
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any, Callable, Dict, Optional
 
 import boto3
@@ -65,6 +66,32 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
+def _to_ddb(value: Any) -> Any:
+    """Convert Python floats to Decimal recursively so boto3 DynamoDB accepts them."""
+
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, float):
+        return Decimal(str(value))
+    if isinstance(value, dict):
+        return {k: _to_ddb(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_to_ddb(v) for v in value]
+    return value
+
+
+def _from_ddb(value: Any) -> Any:
+    """Restore Decimal values returned by boto3 DynamoDB back to int/float."""
+
+    if isinstance(value, Decimal):
+        return int(value) if value % 1 == 0 else float(value)
+    if isinstance(value, dict):
+        return {k: _from_ddb(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_from_ddb(v) for v in value]
+    return value
+
+
 class ResponseCache:
     """DynamoDB TTL cache with fail-open reads and writes."""
 
@@ -109,7 +136,8 @@ class ResponseCache:
             return None
 
         payload = item.get("payload")
-        return payload if isinstance(payload, dict) else None
+        restored = _from_ddb(payload) if isinstance(payload, dict) else None
+        return restored if isinstance(restored, dict) else None
 
     def put(self, key: str, payload: Dict[str, Any]) -> bool:
         """Write through with a 24 h TTL. Returns ``False`` on any error."""
@@ -119,7 +147,7 @@ class ResponseCache:
             self._get_table().put_item(
                 Item={
                     "cache_key": key,
-                    "payload": payload,
+                    "payload": _to_ddb(payload),
                     "expires_at": now + self._ttl_seconds,
                     "created_at": _utc_now_iso(),
                 }

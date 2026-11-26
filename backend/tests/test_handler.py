@@ -1,4 +1,4 @@
-﻿"""Handler behaviour tests with a fake Bedrock client (zero AWS calls)."""
+"""Handler behaviour tests with a fake Bedrock client (zero AWS calls)."""
 
 import json
 from types import SimpleNamespace
@@ -219,3 +219,26 @@ def test_base64_body_is_decoded(monkeypatch, wired):
     event["isBase64Encoded"] = True
     response = handler.lambda_handler(event, None)
     assert response["statusCode"] == 200
+
+
+def test_save_triage_converts_floats_to_decimal_for_dynamodb():
+    from boto3.dynamodb.types import TypeSerializer
+    from storage import save_triage
+
+    written = []
+
+    class StrictTable:
+        def put_item(self, Item):
+            TypeSerializer().serialize(Item)
+            written.append(Item)
+
+    ok = save_triage(
+        {
+            "ticket_id": "tkt-001",
+            "confidence": 0.95,
+            "telemetry": {"estimated_cost_usd": 0.00014, "lambda_gb_seconds": 0.1422},
+        },
+        table=StrictTable(),
+    )
+    assert ok is True
+    assert len(written) == 1

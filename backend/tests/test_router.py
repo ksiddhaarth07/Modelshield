@@ -357,5 +357,22 @@ def test_build_router_respects_env_model_ids(monkeypatch):
     assert router._lite.model_id == "custom.lite-v1:0"
 
 
+def test_clear_p1_signal_routes_direct_pro_in_single_hop():
+    p1_ticket = {
+        "ticket_id": "tkt-086",
+        "subject": "Ransomware note found on a production file server",
+        "body": "Files on the shared production volume have been renamed with a .locked extension.",
+    }
+    pro = FakeClient(invocation(triage_json("P1", "security", 0.98), NOVA_PRO))
+    lite = FakeClient()
+    router = make_router(lite, pro)
+
+    outcome = router.route(p1_ticket)
+
+    assert outcome.telemetry["route_decision"] == "direct_pro"
+    assert lite.calls == []
+    assert len(pro.calls) == 1
+
+
 def test_outcome_type_is_exposed_for_handler():
     assert RouteOutcome.__dataclass_fields__["triage"]

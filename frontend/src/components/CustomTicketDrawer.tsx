@@ -17,38 +17,38 @@ const SAMPLE_BODY =
 function ResultPanel({ label, result }: { label: string; result: TriageResult | string | null }) {
   if (result === null) {
     return (
-      <div className="rounded-xl border border-dashed border-slate-200 p-3">
+      <div className="rounded-xl border border-dashed border-white/15 bg-white/[0.02] p-3">
         <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">{label}</p>
-        <p className="mt-2 text-[11px] text-slate-400">No response yet</p>
+        <p className="mt-2 text-[11px] text-slate-500">No response yet</p>
       </div>
     );
   }
 
   if (typeof result === "string") {
     return (
-      <div className="rounded-xl border border-rose-200 bg-rose-50/60 p-3">
-        <p className="text-[10px] font-semibold uppercase tracking-wide text-rose-500">{label}</p>
-        <p className="mt-1 break-words text-[11px] text-rose-700">{result}</p>
+      <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 p-3">
+        <p className="text-[10px] font-semibold uppercase tracking-wide text-rose-400">{label}</p>
+        <p className="mt-1 break-words text-[11px] text-rose-300">{result}</p>
       </div>
     );
   }
 
   return (
-    <div className="rounded-xl border border-slate-200 bg-white/70 p-3">
+    <div className="card2 p-3">
       <div className="flex items-center justify-between">
         <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">{label}</p>
-        <span className="rounded-full border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[9px] font-semibold text-slate-600">
+        <span className="rounded-full border border-neon-cyan/30 bg-neon-cyan/10 px-2 py-0.5 text-[9px] font-semibold text-neon-cyan">
           {result.telemetry?.route_decision}
         </span>
       </div>
       <div className="mt-2 flex items-baseline gap-2">
-        <span className="text-lg font-semibold tracking-tight">{result.severity}</span>
-        <span className="text-[11px] text-slate-500">{result.category.replace("_", " ")}</span>
+        <span className="text-lg font-bold tracking-tight text-white">{result.severity}</span>
+        <span className="text-[11px] text-slate-400">{result.category.replace("_", " ")}</span>
         <span className="ml-auto text-[10px] text-slate-400 tnum">
           {Math.round(result.telemetry?.latency_ms ?? 0)}ms · {usd(result.telemetry?.estimated_cost_usd, 6)}
         </span>
       </div>
-      <p className="mt-1 line-clamp-2 text-[11px] text-slate-600">{result.summary}</p>
+      <p className="mt-1 line-clamp-2 text-[11px] text-slate-300">{result.summary}</p>
     </div>
   );
 }
@@ -78,11 +78,11 @@ export default function CustomTicketDrawer({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/25 p-4 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-md"
       onMouseDown={onClose}
     >
       <div
-        className="glass w-full max-w-3xl p-5"
+        className="card w-full max-w-3xl border border-white/15 bg-[#191a2c]/95 p-5 shadow-2xl"
         onMouseDown={(event) => event.stopPropagation()}
         role="dialog"
         aria-modal="true"
@@ -90,13 +90,16 @@ export default function CustomTicketDrawer({
       >
         <div className="flex items-start justify-between">
           <div>
-            <p className="kicker">Single ticket tester</p>
-            <h2 className="mt-1 text-base font-semibold tracking-tight">Send one ticket to both stacks</h2>
+            <p className="kicker text-neon-cyan">Single ticket tester</p>
+            <h2 className="mt-1 text-base font-semibold tracking-tight text-white">
+              Send one ticket to both stacks
+            </h2>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="rounded-lg border border-slate-200 px-2 py-1 text-[11px] text-slate-500 hover:bg-slate-50"
+            data-hover="1"
+            className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] text-slate-300 hover:bg-white/10"
           >
             Close
           </button>
@@ -104,33 +107,35 @@ export default function CustomTicketDrawer({
 
         <div className="mt-4 grid gap-3">
           <label className="grid gap-1">
-            <span className="text-[11px] font-medium text-slate-600">Subject</span>
+            <span className="text-[11px] font-medium text-slate-400">Subject</span>
             <input
               value={subject}
               onChange={(event) => setSubject(event.target.value)}
-              className="rounded-xl border border-slate-200 bg-white/80 px-3 py-2 text-[12px] outline-none focus:border-slate-400"
+              className="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-[12px] text-white outline-none focus:border-neon-cyan/50"
             />
           </label>
           <label className="grid gap-1">
-            <span className="text-[11px] font-medium text-slate-600">Body</span>
+            <span className="text-[11px] font-medium text-slate-400">Body</span>
             <textarea
               value={body}
               onChange={(event) => setBody(event.target.value)}
               rows={4}
-              className="resize-none rounded-xl border border-slate-200 bg-white/80 px-3 py-2 text-[12px] outline-none focus:border-slate-400"
+              className="resize-none rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-[12px] text-white outline-none focus:border-neon-cyan/50"
             />
           </label>
         </div>
 
         <div className="mt-3 flex items-center justify-between">
-          <p className="text-[10px] text-slate-400">
-            Same API contract as the benchmark · no ticket is written unless the stack persists it.
+          <p className="text-[10px] text-slate-500">
+            Same API contract as the benchmark · live invocation on both stacks.
           </p>
           <button
             type="button"
             disabled={!valid || loading}
             onClick={() => onSubmit(subject.trim(), body.trim())}
-            className="rounded-xl bg-slate-900 px-4 py-2 text-[12px] font-semibold text-white transition hover:bg-slate-800 disabled:opacity-40"
+            data-hover="1"
+            className="rounded-xl px-4 py-2 text-[12px] font-semibold text-white transition disabled:opacity-40"
+            style={{ background: "linear-gradient(135deg,#7c5cfc,#00c2ff)" }}
           >
             {loading ? "Triaging…" : "Triage on both stacks"}
           </button>

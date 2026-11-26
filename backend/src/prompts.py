@@ -43,9 +43,10 @@ BOUNDARY RULINGS:
 - Billing-contact changes are billing, not account.
 - A contained exposure (credential rotated, no misuse observed) is P2; active misuse is P1.
 - Asking a pricing or proration question ("Will additional seats be prorated?") with no change requested is P4 how_to.
-- Requests for support to rename a tenant/subdomain, extend a trial, re-check DNS verification, or resend an invoice are P3 (account or billing), not P4 how_to.
-- Minor latency increases, duplicate deliveries, or short delivery delays where error rates are normal and no deliveries or users are blocked are P3 incident, not P2.
-- Webhook 401/signature failures or delivery timeouts are incident, even after secret rotation or when referencing docs; missing or wrong webhook payload fields after a release are bug.
+- Requests for support to rename a tenant/subdomain, extend a trial, re-check DNS verification, or resend an invoice — as well as broken invoice/billing workflows or document upload errors — are P3 (account or billing), not P4 how_to (which is strictly informational questions).
+- Minor single-user latency increases, isolated duplicate deliveries, or brief delays where error rates are normal and workflows are unblocked are P3 incident, not P2.
+- Elevated error rates, sustained latency or replication degradation affecting multiple users, or post-release integration regressions are P2, not P3.
+- Webhook authentication/signature failures or delivery timeouts are incident, even after secret rotation or when referencing docs; missing or wrong webhook payload fields after a release are bug.
 
 EXAMPLES:
 Ticket: Please create a custom role for our release managers.

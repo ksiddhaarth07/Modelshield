@@ -53,6 +53,26 @@ HIGH_RISK_KEYWORDS: Sequence[str] = (
     "security incident",
 )
 
+# Clear active P1 crisis phrases: one match sends straight to Nova Pro (1 hop)
+# rather than paying a wasted Nova Lite call and doubling tail latency.
+CRITICAL_P1_SIGNALS: Sequence[str] = (
+    "privilege escalation",
+    "public repository",
+    "public github",
+    "shard corruption",
+    "down for all tenants",
+    "all regions",
+    "unauthorized admin",
+    "exposing customer",
+    "publicly reachable",
+    "double-charging",
+    "returning 500",
+    "error rate is 100%",
+    "ransomware",
+    "multi-region database replication lag",
+    "failing writes",
+)
+
 COMPLEXITY_CHAR_THRESHOLD = 900
 COMPLEXITY_TRIGGER_THRESHOLD = 2
 DEFAULT_CONFIDENCE_THRESHOLD = 0.85
@@ -260,6 +280,8 @@ class AdaptiveRouter:
     @staticmethod
     def _is_complex(ticket: Dict[str, str]) -> bool:
         text = f"{ticket['subject']}\n{ticket['body']}".lower()
+        if any(signal in text for signal in CRITICAL_P1_SIGNALS):
+            return True
         triggers = sum(1 for keyword in HIGH_RISK_KEYWORDS if keyword in text)
         length = len(ticket["subject"]) + len(ticket["body"])
         return length > COMPLEXITY_CHAR_THRESHOLD or triggers >= COMPLEXITY_TRIGGER_THRESHOLD

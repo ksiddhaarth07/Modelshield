@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+from decimal import Decimal
 from typing import Any, Dict, Iterable, List, Optional
 
 import boto3
@@ -39,11 +40,23 @@ def _table(table: Optional[Any] = None) -> Any:
     return _TABLE_CACHE[name]
 
 
+def _to_ddb(value: Any) -> Any:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, float):
+        return Decimal(str(value))
+    if isinstance(value, dict):
+        return {k: _to_ddb(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_to_ddb(v) for v in value]
+    return value
+
+
 def save_triage(record: Dict[str, Any], table: Optional[Any] = None) -> bool:
     """Persist one triage record. Returns ``False`` on a swallowed write error."""
 
     try:
-        _table(table).put_item(Item=record)
+        _table(table).put_item(Item=_to_ddb(record))
         return True
     except (ClientError, BotoCoreError, ValueError, TypeError) as exc:
         LOGGER.warning(
