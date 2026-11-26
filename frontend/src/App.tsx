@@ -259,7 +259,7 @@ export default function App() {
               onOpenMenu={() => setMobileMenuOpen(true)}
             />
 
-            <main className="min-h-0 flex-1 p-3.5 pb-24 md:overflow-hidden md:p-4 md:pb-4">
+            <main className="min-h-0 flex-1 p-3.5 pb-24 md:overflow-y-auto md:overflow-x-hidden md:p-4 md:pb-4">
               <AnimatePresence mode="wait">
                 <motion.div
                   key={page}
